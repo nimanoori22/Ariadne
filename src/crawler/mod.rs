@@ -1,5 +1,8 @@
 //! Bounded static crawling through Spider. Engine-specific types stay here.
+mod discovery;
 mod revalidation;
+pub use discovery::DiscoveryReport;
+pub mod network;
 pub use revalidation::PageCache;
 use std::{
     error::Error,
@@ -91,6 +94,12 @@ pub struct CrawlRequest {
     /// Explicit opt-in for redirects within an intentionally local seed origin.
     /// Only IP loopback seeds qualify; default redirects retain Spider's guard.
     pub allow_loopback_redirects: bool,
+    /// DNS and literal-IP checks at the connection boundary. CLI defaults remain
+    /// suitable for explicitly local fixture/private sources.
+    #[serde(default)]
+    pub public_network_only: bool,
+    #[serde(default)]
+    pub discovery: bool,
 }
 
 impl CrawlRequest {
@@ -115,6 +124,8 @@ impl CrawlRequest {
             audit_capacity: 4096,
             respect_robots: true,
             allow_loopback_redirects: false,
+            public_network_only: false,
+            discovery: false,
         }
     }
 
@@ -138,6 +149,15 @@ impl CrawlRequest {
             return Err(CrawlError(
                 "invalid crawl identity, scope, or resource limits".into(),
             ));
+        }
+        if self.public_network_only {
+            network::validate_public_url(&self.seed)
+                .map_err(|_| CrawlError("non-public crawl seed blocked".into()))?;
+            if self.allow_loopback_redirects {
+                return Err(CrawlError(
+                    "public crawls cannot enable loopback redirects".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -200,6 +220,8 @@ pub struct CrawlReport {
     pub blocked: Vec<BlockedUrl>,
     pub dropped_pages: u64,
     pub audit_overflow: bool,
+    #[serde(default)]
+    pub discovery: DiscoveryReport,
 }
 
 impl CrawlReport {
@@ -317,36 +339,55 @@ async fn crawl_inner(
             engine_policy.redirect(attempt)
         }
     });
-    let client = website
+    let mut builder = website
         .configure_http_client_builder()
         .no_proxy()
-        .redirect(policy)
+        .redirect(policy);
+    if request.public_network_only {
+        builder = builder.dns_resolver(network::resolver());
+    }
+    let client = builder
         .build()
         .map_err(|error| CrawlError(error.to_string()))?;
+    let mut discovery_report = DiscoveryReport::default();
+    let mut seeds = std::collections::BTreeSet::new();
+    if request.discovery && request.max_pages > 1 {
+        // Discovery precedes crawl_raw's normal connector initialization.
+        spider::utils::connect::init_background_runtime();
+        website.configure_robots_parser(&client).await;
+        // Manifests do not follow redirects: every probed URL receives its
+        // own scope and robots check before any request is sent.
+        let mut manifests = website
+            .configure_http_client_builder()
+            .no_proxy()
+            .redirect(spider::client::redirect::Policy::none());
+        if request.public_network_only {
+            manifests = manifests.dns_resolver(network::resolver());
+        }
+        let manifests = manifests
+            .build()
+            .map_err(|error| CrawlError(error.to_string()))?;
+        (seeds, discovery_report) = discovery::discover(&manifests, &website, &request).await;
+    }
+    if let Some(cache) = &cache
+        && request.max_pages > 1
+    {
+        seeds.extend(cache.urls().iter().filter_map(|raw| {
+            let url = Url::parse(raw).ok()?;
+            (request.scope.contains(&url)
+                && request
+                    .max_path_segments
+                    .is_none_or(|max| path_segments(&url) <= max))
+            .then(|| raw.clone())
+        }));
+    }
+    if !seeds.is_empty() {
+        seeds.insert(request.seed.to_string());
+        website.set_extra_links(seeds.into_iter().map(Into::into).collect());
+        website.persist_links();
+    }
     let (revalidation_tx, revalidation_rx) = mpsc::sync_channel(request.audit_capacity);
     if let Some(cache) = cache {
-        if request.max_pages > 1 {
-            website.set_extra_links(
-                cache
-                    .urls()
-                    .iter()
-                    .filter_map(|raw| {
-                        let url = Url::parse(raw).ok()?;
-                        (request.scope.contains(&url)
-                            && request
-                                .max_path_segments
-                                .is_none_or(|max| path_segments(&url) <= max))
-                        .then(|| raw.clone().into())
-                    })
-                    .collect(),
-            );
-            // Spider's setup clears an initial Website's extra links unless its
-            // status is Active. Keep the seed explicitly when setup skips it.
-            let mut seeds = website.get_extra_links().clone();
-            seeds.insert(request.seed.to_string().into());
-            website.set_extra_links(seeds);
-            website.persist_links();
-        }
         website.with_fetch_engine(revalidation::RevalidationEngine {
             client: client.clone(),
             cache,
@@ -413,6 +454,7 @@ async fn crawl_inner(
         blocked,
         dropped_pages,
         audit_overflow: overflow.load(Ordering::Relaxed),
+        discovery: discovery_report,
     })
 }
 

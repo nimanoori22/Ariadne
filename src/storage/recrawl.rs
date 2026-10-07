@@ -103,11 +103,12 @@ impl KnowledgeStore {
 
     pub async fn source_status(&self, source: &str) -> Result<Value> {
         let registered = self.get_source(source).await?.context("source not found")?;
-        let mut result = self.db.query("BEGIN TRANSACTION; SELECT count() AS count FROM document WHERE source = type::record('source', $source) GROUP ALL; SELECT count() AS count FROM document WHERE source = type::record('source', $source) AND data.revalidation.availability = 'removed' GROUP ALL; SELECT VALUE data FROM crawl_run WHERE source = type::record('source', $source) ORDER BY data.started_at.secs_since_epoch DESC, data.started_at.nanos_since_epoch DESC LIMIT 1; COMMIT TRANSACTION;")
+        let mut result = self.db.query("BEGIN TRANSACTION; SELECT count() AS count FROM document WHERE source = type::record('source', $source) GROUP ALL; SELECT count() AS count FROM document WHERE source = type::record('source', $source) AND data.revalidation.availability = 'removed' GROUP ALL; SELECT VALUE data FROM crawl_run WHERE source = type::record('source', $source) ORDER BY data.started_at.secs_since_epoch DESC, data.started_at.nanos_since_epoch DESC LIMIT 1; SELECT VALUE data FROM crawl_job WHERE source=type::record('source',$source) ORDER BY data.created_at.secs_since_epoch DESC, data.created_at.nanos_since_epoch DESC LIMIT 10; COMMIT TRANSACTION;")
             .bind(("source", source.to_owned())).await?.check()?;
         let all: Vec<Value> = result.take(1)?;
         let removed: Vec<Value> = result.take(2)?;
         let runs: Vec<Value> = result.take(3)?;
+        let jobs: Vec<Value> = result.take(4)?;
         let total = all.first().and_then(|v| v["count"].as_u64()).unwrap_or(0);
         let removed = removed
             .first()
@@ -115,7 +116,7 @@ impl KnowledgeStore {
             .unwrap_or(0);
         Ok(
             json!({"source":registered,"documents":total,"active_documents":total-removed,
-            "removed_documents":removed,"latest_run":runs.into_iter().next()}),
+            "removed_documents":removed,"latest_run":runs.into_iter().next(),"recent_jobs":jobs}),
         )
     }
 }

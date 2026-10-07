@@ -131,6 +131,7 @@ async fn ingest(store: &KnowledgeStore, source: &str, run: &str, pages: &[(&str,
             blocked: vec![],
             dropped_pages: 0,
             audit_overflow: false,
+            discovery: Default::default(),
         })
         .await
         .unwrap();

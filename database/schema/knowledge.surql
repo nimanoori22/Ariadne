@@ -1,8 +1,10 @@
 DEFINE TABLE source SCHEMAFULL;
 DEFINE FIELD data ON source TYPE object FLEXIBLE;
+-- Serializes concurrent admission transactions without changing source provenance.
+DEFINE FIELD admission_revision ON source TYPE int DEFAULT 0;
 DEFINE TABLE crawl_run SCHEMAFULL;
 DEFINE FIELD source ON crawl_run TYPE record<source>;
-DEFINE FIELD status ON crawl_run TYPE string ASSERT $value IN ['running', 'completed', 'failed', 'interrupted'];
+DEFINE FIELD status ON crawl_run TYPE string ASSERT $value IN ['running', 'completed', 'failed', 'interrupted', 'cancelled'];
 DEFINE FIELD data ON crawl_run TYPE object FLEXIBLE;
 DEFINE TABLE page_outcome SCHEMAFULL;
 DEFINE FIELD crawl ON page_outcome TYPE record<crawl_run>;
@@ -32,3 +34,9 @@ DEFINE FIELD data ON embedding_space TYPE object FLEXIBLE;
 DEFINE ANALYZER documentation_lexical_v1 TOKENIZERS blank, punct FILTERS lowercase;
 DEFINE INDEX chunk_text_search ON chunk FIELDS data.text FULLTEXT ANALYZER documentation_lexical_v1 BM25;
 DEFINE INDEX chunk_title_search ON chunk FIELDS data.title FULLTEXT ANALYZER documentation_lexical_v1 BM25;
+
+DEFINE TABLE crawl_job SCHEMAFULL;
+DEFINE FIELD source ON crawl_job TYPE record<source>;
+DEFINE FIELD status ON crawl_job TYPE string ASSERT $value IN ['queued', 'running', 'completed', 'partial', 'failed', 'cancelled', 'interrupted'];
+DEFINE FIELD data ON crawl_job TYPE object FLEXIBLE;
+DEFINE INDEX jobs_by_source ON crawl_job FIELDS source;

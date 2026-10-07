@@ -23,8 +23,10 @@ search are implemented; the milestone 1 acceptance gate now passes, including
 real local Ollama retrieval after restart and a bounded live documentation crawl.
 See `docs/mcp.md`. Incremental recrawling is implemented with durable HTTP
 validators, hash/version-aware reuse, atomic replacement, conservative removal,
-offline reprocessing and CLI status; see `docs/recrawling.md`. The next work is
-step 12: expanded agent access and operational reliability. Hybrid ranking,
+offline reprocessing and CLI status; see `docs/recrawling.md`. Step 12 adds
+expanded agent access and operational reliability; see `docs/agent-operations.md`.
+The two-source MCP acceptance gate passes. The next work is Spider browser
+fallback for documentation whose static HTML lacks useful content. Hybrid ranking,
 metadata filters, bounded context expansion, CLI and MCP integration are
 implemented; see `docs/hybrid-retrieval.md`.
 
@@ -247,7 +249,7 @@ this validates fusion, not general real-model quality. See `docs/hybrid-retrieva
 **Done when:** evaluation demonstrates a useful improvement over individual search
 modes and expanded context remains bounded and source-backed.
 
-### 12. Expand agent access and operational reliability
+### 12. Expand agent access and operational reliability — implemented
 
 - Add `get_document`, `get_section`, `list_sources`, `source_status`, `crawl`,
   and `recrawl` tools as backed use cases become available.
@@ -259,7 +261,14 @@ modes and expanded context remains bounded and source-backed.
 - Test arbitrary URL inputs and redirects so remotely callable crawling has explicit
   network access boundaries; configure access control before remote deployment.
 
-**Milestone acceptance:** two independently scoped sources can be recrawled and
+Implemented: nine MCP tools, administrator-controlled source allowlists, public
+connection-time address policy, bounded supervised jobs with durable status and
+cancellation, scoped sitemap/llms discovery, recovery/upgrade checks, closed-store
+backup guidance, and explicit latency/retained-byte measurements. Navigation links
+continue through Spider. Progress is stage-based; remote transport/authentication,
+gzip sitemaps and online backups remain outside this local milestone.
+
+**Milestone acceptance (passed):** two independently scoped sources can be recrawled and
 searched through MCP with filters, hybrid ranking, context, and inspectable status.
 
 ## Later work, driven by demonstrated retrieval needs

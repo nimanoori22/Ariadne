@@ -68,6 +68,7 @@ fn batch(run: &str, outcomes: Vec<ExtractionOutcome>) -> ExtractionBatch {
         blocked: vec![],
         dropped_pages: 0,
         audit_overflow: false,
+        discovery: Default::default(),
     }
 }
 async fn setup() -> (TempDir, KnowledgeStore) {

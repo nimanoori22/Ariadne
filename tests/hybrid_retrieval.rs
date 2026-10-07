@@ -128,6 +128,7 @@ async fn ingest(
                     blocked: vec![],
                     dropped_pages: 0,
                     audit_overflow: false,
+                    discovery: Default::default(),
                 },
                 ChunkPolicy {
                     target_chars: budget,

@@ -241,6 +241,7 @@ pub(crate) async fn prepare_incremental(
             blocked: report.blocked,
             dropped_pages: report.dropped_pages,
             audit_overflow: report.audit_overflow,
+            discovery: report.discovery,
         },
         indexes,
         recrawl: Some(plan),

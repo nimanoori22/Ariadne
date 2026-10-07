@@ -3,6 +3,7 @@ pub mod crawler;
 pub mod embeddings;
 pub mod extraction;
 pub mod ingestion;
+pub mod jobs;
 pub mod mcp;
 pub mod retrieval;
 pub mod storage;

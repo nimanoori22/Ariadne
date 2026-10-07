@@ -22,6 +22,7 @@ pub enum IngestionStatus {
     Partial,
     Failed,
     Interrupted,
+    Cancelled,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -282,6 +283,7 @@ async fn ingest_text(
                     blocked: vec![],
                     dropped_pages: 0,
                     audit_overflow: false,
+                    discovery: Default::default(),
                 }
             }
         };

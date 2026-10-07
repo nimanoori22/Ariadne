@@ -1,6 +1,8 @@
-//! Read-only knowledge API over MCP stdio. Web content is always source data.
+//! Bounded knowledge API over MCP stdio. Web content is always source data.
+mod operations;
 use crate::{
     embeddings::{OllamaConfig, OllamaProvider},
+    jobs::{CrawlAccess, JobManager},
     retrieval::{
         ContextOptions, MetadataFilter, SearchQuery, assemble_context, hybrid_search, search,
         vector_search,
@@ -59,12 +61,19 @@ pub struct KnowledgeMcp {
     provider: OnceCell<OllamaProvider>,
     requests: Semaphore,
     vectors: Semaphore,
+    jobs: Arc<JobManager>,
 }
 
 impl KnowledgeMcp {
     pub fn new(store: KnowledgeStore, config: OllamaConfig) -> Self {
+        Self::with_access(store, config, CrawlAccess::default())
+    }
+    pub fn with_access(store: KnowledgeStore, config: OllamaConfig, access: CrawlAccess) -> Self {
+        let store = Arc::new(store);
+        let jobs = JobManager::new(store.clone(), config.clone(), access);
         Self {
-            store: Arc::new(store),
+            store,
+            jobs,
             config,
             provider: OnceCell::new(),
             requests: Semaphore::new(4),
@@ -166,7 +175,11 @@ impl ServerHandler for KnowledgeMcp {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        (name == "search").then(search_tool)
+        if name == "search" {
+            Some(search_tool())
+        } else {
+            operations::tools().into_iter().find(|t| t.name == name)
+        }
     }
 
     async fn list_tools(
@@ -180,7 +193,9 @@ impl ServerHandler for KnowledgeMcp {
                 None,
             ));
         }
-        Ok(ListToolsResult::with_all_items(vec![search_tool()]))
+        let mut tools = vec![search_tool()];
+        tools.extend(operations::tools());
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
@@ -188,34 +203,41 @@ impl ServerHandler for KnowledgeMcp {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        if request.name != "search" {
-            return Err(McpError::invalid_params("unknown knowledge tool", None));
-        }
-        let input: SearchInput = serde_json::from_value(serde_json::Value::Object(
-            request.arguments.unwrap_or_default(),
-        ))
-        .map_err(|_| McpError::invalid_params("invalid search arguments; see tools/list", None))?;
-        let mut validation = SearchQuery::new(&input.query);
-        validation.source_id = input.source_id.clone();
-        validation.limit = input.limit;
-        validation.max_text_chars = input.max_text_chars;
-        validation.filter = input.filter.clone();
-        validation
-            .validate()
-            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        if let Some(options) = input.context {
-            options
+        let args = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
+        let input = if request.name == "search" {
+            let input: SearchInput = serde_json::from_value(serde_json::Value::Object(
+                request.arguments.clone().unwrap_or_default(),
+            ))
+            .map_err(|_| {
+                McpError::invalid_params("invalid search arguments; see tools/list", None)
+            })?;
+            let mut validation = SearchQuery::new(&input.query);
+            validation.source_id = input.source_id.clone();
+            validation.limit = input.limit;
+            validation.max_text_chars = input.max_text_chars;
+            validation.filter = input.filter.clone();
+            validation
                 .validate()
                 .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-        }
+            if let Some(options) = input.context {
+                options
+                    .validate()
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+            }
+            Some(input)
+        } else {
+            self.validate_operation(&request.name, &args)?;
+            None
+        };
         let Ok(_permit) = self.requests.try_acquire() else {
-            return Ok(
-                CallToolResult::error(vec![ContentBlock::text("search busy; retry later")]).into(),
-            );
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                "knowledge API busy; retry later",
+            )])
+            .into());
         };
         let result = tokio::select! {
             _ = context.ct.cancelled() => Err(anyhow::anyhow!("search cancelled")),
-            result = tokio::time::timeout(Duration::from_secs(180), self.search(input)) =>
+            result = tokio::time::timeout(Duration::from_secs(180), async { if let Some(input)=input { self.search(input).await } else { self.operation(&request.name,args).await } }) =>
                 result.unwrap_or_else(|_| Err(anyhow::anyhow!("search timed out"))),
         };
         Ok(match result {
@@ -223,25 +245,33 @@ impl ServerHandler for KnowledgeMcp {
             Err(error) => {
                 tracing::warn!(error = %error, "knowledge search failed");
                 // Do not expose SQL, paths, response bodies or private provider details.
-                CallToolResult::error(vec![ContentBlock::text("Search unavailable. For vector/hybrid modes, check Ollama and run `embed <source-id>` with the configured model. Inspect application stderr for details; lexical search remains available.")])
+                CallToolResult::error(vec![ContentBlock::text(if request.name != "search" {"Knowledge operation unavailable. Check the registered source, MCP crawl allowlist, network policy and active job limits. Inspect application stderr for details."} else {"Search unavailable. For vector/hybrid modes, check Ollama and run `embed <source-id>` with the configured model. Inspect application stderr for details; lexical search remains available."})])
             }
         }.into())
     }
 }
 
 pub async fn serve_stdio(store: KnowledgeStore, config: OllamaConfig) -> Result<()> {
-    let service = KnowledgeMcp::new(store, config)
-        .serve(rmcp::transport::stdio())
-        .await?;
+    let handler = KnowledgeMcp::with_access(store, config, CrawlAccess::from_env()?);
+    let jobs = handler.jobs.clone();
+    let service = handler.serve(rmcp::transport::stdio()).await?;
     let cancellation = service.cancellation_token();
     let waiting = service.waiting();
     tokio::pin!(waiting);
-    tokio::select! {
-        result = &mut waiting => { result?; },
+    let result = tokio::select! {
+        result = &mut waiting => result.map(|_|()),
         _ = tokio::signal::ctrl_c() => {
             cancellation.cancel();
-            waiting.await?;
+            waiting.await.map(|_|())
         },
-    }
+    };
+    jobs.shutdown().await;
+    result?;
     Ok(())
+}
+
+impl Drop for KnowledgeMcp {
+    fn drop(&mut self) {
+        self.jobs.request_shutdown();
+    }
 }

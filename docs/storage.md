@@ -36,8 +36,9 @@ pruning does not make every field-definition change safe. Do not open an existin
 database with an older app release as a downgrade procedure.
 
 SurrealKV owns an exclusive datastore lock. Only one Ariadne process can use a
-database directory at a time. In the future, the long-running MCP process will
-own that store and management commands will need to communicate with it. The SDK
+database directory at a time. The long-running MCP process owns that store; agents can inspect sources and run
+crawl/recrawl jobs through its knowledge tools. Stop it before using the CLI
+against the same directory. The SDK
 begins asynchronous shutdown when its last handle is dropped. After a restart,
 previous `running` crawls become `interrupted` and remain inspectable.
 
@@ -121,3 +122,43 @@ with document replacement; see `embeddings.md` for state and migration policy.
 References: [SurrealDB embedding](https://surrealdb.com/docs/reference/rust/embedding),
 [SurrealKit embedded/library support](https://github.com/surrealdb/surrealkit/tree/main/crates/surrealkit),
 [schema sync and rollouts](https://surrealdb.com/docs/manage/schema-migration).
+
+## Backup and restore
+
+Use a **closed-store directory backup** for this embedded SurrealKV deployment.
+Stop the MCP/application process cleanly and wait for it to exit before copying.
+Do not copy live datastore files: this application does not implement online
+snapshot coordination. Record the application commit/version and embedding model
+revision with the backup. Copy the whole `knowledge` directory, including all
+nested files, rather than selecting particular engine files.
+
+For example, with an explicit data directory and the application stopped:
+
+```sh
+cp -a /your/ariadne-data/knowledge /your/backup/knowledge
+```
+
+Restore into a fresh directory, preserving the original backup:
+
+```sh
+mkdir -p /your/ariadne-restored
+cp -a /your/backup/knowledge /your/ariadne-restored/knowledge
+ARIADNE_DATA_DIR=/your/ariadne-restored ./target/debug/Ariadne source list
+ARIADNE_DATA_DIR=/your/ariadne-restored ./target/debug/Ariadne source status SOURCE_ID
+```
+
+Open the copy with the same application version first, inspect sources and crawl
+status, and run a known lexical search before switching MCP to the restored data
+directory. Keep the old directory until verification succeeds. A model must still
+be installed locally to perform vector/hybrid queries; vectors and model identity
+are in the database, model weights are not. Startup applies bundled SurrealKit
+schema sync and marks unfinished jobs interrupted. Test an upgrade on a restored
+copy before opening an important original database with a new release.
+
+The step-12 schema adds `crawl_job`, the cancelled run status, and a source
+admission revision that serializes concurrent job reservations without changing
+source provenance. Upgrade tests
+verify that an earlier schema retains sources, abandoned jobs become interrupted,
+and copying a closed datastore preserves job/source records. The earlier full-text
+and chunk schema upgrade tests also remain in the suite. This is targeted upgrade
+coverage, not a guarantee for arbitrary future schema changes or engine downgrades.

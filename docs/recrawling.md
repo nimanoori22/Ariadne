@@ -105,5 +105,5 @@ cargo test --test recrawling
 ```
 
 Recrawl/status are CLI and library operations in this step. MCP still exposes
-search; additional agent operations remain step 12. Hybrid ranking and context
+search; additional agent operations are now implemented; see [agent operations](agent-operations.md). Hybrid ranking and context
 expansion are the next implementation step.

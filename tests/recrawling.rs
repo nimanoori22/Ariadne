@@ -951,6 +951,7 @@ async fn an_old_extraction_version_is_reprocessed_even_when_http_returns_304() {
             blocked: vec![],
             dropped_pages: 0,
             audit_overflow: false,
+            discovery: Default::default(),
         })
         .await
         .unwrap();

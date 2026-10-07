@@ -50,6 +50,8 @@ pub struct ExtractionBatch {
     pub blocked: Vec<crate::crawler::BlockedUrl>,
     pub dropped_pages: u64,
     pub audit_overflow: bool,
+    #[serde(default)]
+    pub discovery: crate::crawler::DiscoveryReport,
 }
 
 impl ExtractionBatch {
@@ -69,5 +71,6 @@ pub fn extract_crawl(report: CrawlReport) -> ExtractionBatch {
         blocked: report.blocked,
         dropped_pages: report.dropped_pages,
         audit_overflow: report.audit_overflow,
+        discovery: report.discovery,
     }
 }

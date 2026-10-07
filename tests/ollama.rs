@@ -81,6 +81,7 @@ async fn cli_embeds_resumes_reports_coverage_and_returns_vector_hits() {
             blocked: vec![],
             dropped_pages: 0,
             audit_overflow: false,
+            discovery: Default::default(),
         })
         .await
         .unwrap();

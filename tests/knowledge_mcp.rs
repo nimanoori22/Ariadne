@@ -225,7 +225,7 @@ async fn acceptance(real_model: bool) {
     let transport = TokioChildProcess::new(command(&["mcp"])).unwrap();
     let client = ().serve(transport).await.unwrap();
     let tools = client.list_tools(None).await.unwrap();
-    assert_eq!(tools.tools.len(), 1);
+    assert_eq!(tools.tools.len(), 9);
     assert_eq!(tools.tools[0].name, "search");
     let no_lexical = client
         .call_tool(

@@ -53,6 +53,7 @@ async fn ingest(store: &KnowledgeStore, source: &str, run: &str, pages: &[(&str,
             blocked: vec![],
             dropped_pages: 0,
             audit_overflow: false,
+            discovery: Default::default(),
         })
         .await
         .unwrap();
@@ -332,6 +333,7 @@ async fn replacement_updates_the_search_index_and_rejection_preserves_good_resul
             blocked: vec![],
             dropped_pages: 0,
             audit_overflow: false,
+            discovery: Default::default(),
         })
         .await
         .unwrap();

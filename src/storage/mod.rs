@@ -1,5 +1,7 @@
 //! Embedded SurrealDB and the sole SurrealQL boundary.
 mod embeddings;
+mod jobs;
+mod knowledge;
 mod recrawl;
 mod retrieval;
 use std::{
@@ -181,6 +183,8 @@ impl KnowledgeStore {
         db.query("UPDATE crawl_run SET status = 'interrupted', data.status = 'interrupted', data.error = 'application stopped before crawl completion' WHERE status = 'running';").await?.check()?;
         db.query("UPDATE crawl_run SET data.ingestion.status = 'interrupted', data.ingestion.error = 'application stopped before ingestion completion', data.ingestion.updated_at = $now, data.ingestion.finished_at = $now WHERE data.ingestion.status = 'running';")
             .bind(("now", serde_json::to_value(SystemTime::now())?)).await?.check()?;
+        db.query("UPDATE crawl_job SET status = 'interrupted', data.status = 'interrupted', data.error = 'application stopped before job completion', data.finished_at = $now WHERE status IN ['queued', 'running'];")
+            .bind(("now",serde_json::to_value(SystemTime::now())?)).await?.check()?;
         tracing::info!(path = %path.display(), "opened embedded knowledge store");
         let store = Self { db, path };
         store.restore_embedding_schemas().await?;
@@ -248,7 +252,7 @@ impl KnowledgeStore {
             error: None,
             ingestion: None,
         };
-        self.transaction("BEGIN TRANSACTION; IF !record::exists(type::record('source', $source_id)) { THROW 'unknown source'; }; IF array::len(SELECT id FROM crawl_run WHERE source = type::record('source', $source_id) AND status = 'running' LIMIT 1) > 0 { THROW 'source already has a running crawl'; }; CREATE ONLY type::record('crawl_run', [$source_id, $crawl_id]) SET source = type::record('source', $source_id), status = 'running', data = $data; COMMIT TRANSACTION;", json!({"source_id":request.source_id,"crawl_id":request.crawl_id,"data":run})).await.context("begin crawl")?;
+        self.transaction("BEGIN TRANSACTION; IF !record::exists(type::record('source', $source_id)) { THROW 'unknown source'; }; UPDATE type::record('source',$source_id) SET admission_revision=(admission_revision ?? 0)+1; LET $job=type::record('crawl_job',$crawl_id); IF record::exists($job) AND $job.status != 'running' { THROW 'job is no longer running'; }; IF array::len(SELECT id FROM crawl_job WHERE source=type::record('source',$source_id) AND status IN ['queued','running'] AND id != $job LIMIT 1)>0 { THROW 'source already has an active job'; }; IF array::len(SELECT id FROM crawl_run WHERE source = type::record('source', $source_id) AND status = 'running' LIMIT 1) > 0 { THROW 'source already has a running crawl'; }; CREATE ONLY type::record('crawl_run', [$source_id, $crawl_id]) SET source = type::record('source', $source_id), status = 'running', data = $data; COMMIT TRANSACTION;", json!({"source_id":request.source_id,"crawl_id":request.crawl_id,"data":run})).await.context("begin crawl")?;
         Ok(())
     }
 
@@ -281,7 +285,7 @@ impl KnowledgeStore {
         crawl_id: &str,
         progress: &crate::ingestion::IngestionProgress,
     ) -> Result<()> {
-        self.transaction("BEGIN TRANSACTION; LET $run = type::record('crawl_run', [$source_id, $crawl_id]); IF !record::exists($run) { THROW 'unknown crawl'; }; UPDATE $run SET data.ingestion = $progress; COMMIT TRANSACTION;", json!({"source_id":source_id,"crawl_id":crawl_id,"progress":progress})).await.context("checkpoint ingestion")?;
+        self.transaction("BEGIN TRANSACTION; LET $run = type::record('crawl_run', [$source_id, $crawl_id]); IF !record::exists($run) { THROW 'unknown crawl'; }; LET $job=type::record('crawl_job',$crawl_id); IF $run.status IN ['cancelled','failed','interrupted'] OR (record::exists($job) AND $job.status NOT IN ['queued','running']) { THROW 'ingestion is no longer running'; }; UPDATE $run SET data.ingestion = $progress; COMMIT TRANSACTION;", json!({"source_id":source_id,"crawl_id":crawl_id,"progress":progress})).await.context("checkpoint ingestion")?;
         Ok(())
     }
 
@@ -431,7 +435,7 @@ impl KnowledgeStore {
                 "unchanged":reused.len(),"removed":removed.len(),"absence_pruning":false,
                 "coverage":"not_proven","known_documents":plan.known_documents,"unvisited_known":plan.unvisited_known});
         }
-        let summary = json!({"started_at": batch.started_at, "finished_at": batch.finished_at, "page_count": pages.len(), "document_count": documents.len() + reused.len(), "chunk_count": chunk_count, "oversized_chunk_count": oversized_chunk_count, "alias_count": extracted_count - documents.len(), "rejected_count": rejected_count, "removed_count":removed.len(),"incremental":incremental,"blocked": batch.blocked, "dropped_pages": batch.dropped_pages, "audit_overflow": batch.audit_overflow, "delivery_complete": batch.dropped_pages == 0 && !batch.audit_overflow});
+        let summary = json!({"started_at": batch.started_at, "finished_at": batch.finished_at, "page_count": pages.len(), "document_count": documents.len() + reused.len(), "chunk_count": chunk_count, "oversized_chunk_count": oversized_chunk_count, "alias_count": extracted_count - documents.len(), "rejected_count": rejected_count, "removed_count":removed.len(),"incremental":incremental,"blocked": batch.blocked, "dropped_pages": batch.dropped_pages, "audit_overflow": batch.audit_overflow, "delivery_complete": batch.dropped_pages == 0 && !batch.audit_overflow,"discovery":batch.discovery,"crawl_elapsed_ms":batch.finished_at.duration_since(batch.started_at).unwrap_or_default().as_millis(),"retained_body_bytes":pages.iter().filter_map(|p|p["page"]["raw_body"].as_array().map(Vec::len)).sum::<usize>()});
         self.transaction(
             include_str!("finish_crawl.surql"),
             json!({
@@ -595,6 +599,18 @@ mod tests {
         .unwrap();
         db.use_ns("ariadne").use_db("knowledge").await.unwrap();
         let previous_sql = SCHEMA[0].sql.split("DEFINE ANALYZER").next().unwrap();
+        db.query(format!(
+            "DEFINE TABLE crawl_job{}",
+            SCHEMA[0]
+                .sql
+                .split("DEFINE TABLE crawl_job")
+                .nth(1)
+                .unwrap()
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
         Sync::embedded(&[EmbeddedSchemaFile {
             path: SCHEMA[0].path,
             sql: previous_sql,
@@ -631,6 +647,7 @@ mod tests {
                 blocked: vec![],
                 dropped_pages: 0,
                 audit_overflow: false,
+                discovery: Default::default(),
             })
             .await
             .unwrap();
@@ -739,6 +756,7 @@ mod tests {
                 blocked: vec![],
                 dropped_pages: 0,
                 audit_overflow: false,
+                discovery: Default::default(),
             })
             .await
             .unwrap();
@@ -790,6 +808,7 @@ mod tests {
                 blocked: vec![],
                 dropped_pages: 0,
                 audit_overflow: false,
+                discovery: Default::default(),
             }
         };
         store.begin_crawl(&request("good")).await.unwrap();
