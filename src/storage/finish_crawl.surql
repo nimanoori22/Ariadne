@@ -17,6 +17,8 @@ FOR $doc IN $documents {
     DELETE section WHERE document = $document;
     UPSERT $document SET source = type::record('source', $source_id), crawl = $run,
         canonical_url = $doc.url, data = $doc.data;
+    UPDATE $document SET data.revalidation = $doc.validation ?? {availability: 'active', last_checked_at: $finished,
+        last_checked_crawl_id: $crawl_id, status: $doc.data.page.status, headers: $doc.data.page.headers};
     FOR $section IN $doc.sections {
         CREATE type::record('section', [$source_id, $doc.url, $section.id])
             SET document = $document, sequence = $section.id, data = $section,
@@ -30,6 +32,39 @@ FOR $doc IN $documents {
                 sequence = $chunk.sequence, data = $chunk;
     };
 };
+FOR $reuse IN $reused {
+    LET $document = type::record('document', [$source_id, $reuse.url]);
+    IF !record::exists($document) OR $document.data.indexing.hashes.normalized_sha256 != $reuse.indexing.hashes.normalized_sha256 {
+        THROW 'reused document changed during recrawl';
+    };
+    LET $headers = IF $reuse.kind = 'not_modified' {
+        -- Merge only representation/cache metadata from the 304, never its
+        -- zero Content-Length into the retained HTML representation.
+        LET $base = $document.data.revalidation.headers ?? $document.data.page.headers;
+        LET $fresh = array::filter($reuse.page.headers, |$h| $h[0] IN ['etag', 'last-modified', 'cache-control', 'vary', 'content-location']);
+        LET $names = array::map($fresh, |$h| $h[0]);
+        array::concat(array::filter($base, |$h| $h[0] NOT IN $names), $fresh)
+    } ELSE { $reuse.page.headers };
+    IF $reuse.refreshed != NULL { UPDATE $document SET data = $reuse.refreshed; }
+    ELSE IF $reuse.kind != 'not_modified' { UPDATE $document SET data.page = $reuse.page; };
+    UPDATE $document SET data.indexing = $reuse.indexing,
+        data.revalidation = {availability: 'active', last_checked_at: $finished,
+            last_checked_crawl_id: $crawl_id, status: $reuse.page.status, headers: $headers};
+};
+FOR $removed IN $removed {
+    LET $document = type::record('document', [$source_id, $removed.url]);
+    IF !record::exists($document) { THROW 'removed document is unknown'; };
+    FOR $table IN (SELECT VALUE table_name FROM embedding_space) {
+        UPDATE type::table($table) SET data.status = 'stale', vector = NONE, data.updated_at = $finished WHERE document = $document;
+    };
+    DELETE chunk WHERE document = $document;
+    -- Keep raw/structured content for inspection and future reprocessing, but
+    -- remove retrieval units only after a directly observed 404/410.
+    UPDATE $document SET data.revalidation = {availability: 'removed',
+        last_checked_at: $finished, last_checked_crawl_id: $crawl_id,
+        status: $removed.page.status, headers: []};
+};
 UPDATE $run SET status = 'completed', data.status = 'completed',
     data.finished_at = $finished, data.summary = $summary;
+UPDATE $run SET data.summary.budget_reached = array::len($pages) >= data.configuration.max_pages;
 COMMIT TRANSACTION;

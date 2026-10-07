@@ -7,7 +7,9 @@ name = "Ariadne"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "directories",
+ "httpdate",
  "regex",
  "reqwest 0.12.28",
  "rmcp",

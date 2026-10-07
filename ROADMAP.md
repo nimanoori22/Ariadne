@@ -21,7 +21,10 @@ CLI operations; see `docs/embeddings.md`. A real embeddinggemma semantic fixture
 has passed. Foreground ingestion orchestration and stdio MCP lexical/vector
 search are implemented; the milestone 1 acceptance gate now passes, including
 real local Ollama retrieval after restart and a bounded live documentation crawl.
-See `docs/mcp.md`. The next work is step 10: incremental recrawling.
+See `docs/mcp.md`. Incremental recrawling is implemented with durable HTTP
+validators, hash/version-aware reuse, atomic replacement, conservative removal,
+offline reprocessing and CLI status; see `docs/recrawling.md`. The next work is
+step 11: hybrid ranking and context expansion.
 
 At the initial roadmap inspection, the repository contained a Rust 2024 package,
 an empty dependency list, and a `src/main.rs` that printed “Hello, world!”. This
@@ -203,6 +206,13 @@ Add one deliberately bounded real documentation crawl as a manual smoke test.
 ## Milestone 2: reliable recrawling and richer retrieval
 
 ### 10. Add incremental recrawling
+
+**Implemented:** persisted ETag/Last-Modified validation through Spider's fetch
+hook; 304/raw/structured reuse; processing-version and policy invalidation;
+atomic chunk/vector replacement; direct 404/410 removal with retained raw content;
+no absence pruning; offline reprocessing; CLI recrawl/status and interruption
+recovery. Deterministic fixtures verify unchanged runs generate no embeddings and
+single-page changes update only affected data. See `docs/recrawling.md`.
 
 - Persist ETag/Last-Modified validators and correctly handle conditional responses.
 - Skip unchanged normalization, chunking, and embedding work using content hashes

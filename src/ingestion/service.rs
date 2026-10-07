@@ -4,10 +4,10 @@ use std::{future::Future, time::SystemTime};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
-use super::{extract_crawl, prepare_crawl};
+use super::{extract_crawl, prepare_crawl, prepare_incremental};
 use crate::{
     chunking::ChunkPolicy,
-    crawler::{CrawlRequest, crawl},
+    crawler::{CrawlReport, CrawlRequest, crawl, crawl_with_cache},
     embeddings::{
         EmbeddingCoverage, EmbeddingProvider, EmbeddingReport, EmbeddingSpace, index_source,
     },
@@ -34,8 +34,19 @@ pub enum IngestionStage {
     Complete,
 }
 
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IngestionOperation {
+    #[default]
+    Ingest,
+    Recrawl,
+    Reprocess,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IngestionProgress {
+    #[serde(default)]
+    pub operation: IngestionOperation,
     pub status: IngestionStatus,
     pub stage: IngestionStage,
     pub started_at: SystemTime,
@@ -63,7 +74,54 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<P>>,
 {
-    let mut progress = ingest_text(store, source, request.clone(), policy, true).await?;
+    with_embeddings(
+        store,
+        source,
+        request,
+        policy,
+        provider,
+        IngestionOperation::Ingest,
+    )
+    .await
+}
+
+pub async fn recrawl<P, F, Fut>(
+    store: &KnowledgeStore,
+    source: Source,
+    request: CrawlRequest,
+    policy: ChunkPolicy,
+    provider: F,
+) -> Result<CrawlRun>
+where
+    P: EmbeddingProvider,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<P>>,
+{
+    with_embeddings(
+        store,
+        source,
+        request,
+        policy,
+        provider,
+        IngestionOperation::Recrawl,
+    )
+    .await
+}
+
+async fn with_embeddings<P, F, Fut>(
+    store: &KnowledgeStore,
+    source: Source,
+    request: CrawlRequest,
+    policy: ChunkPolicy,
+    provider: F,
+    operation: IngestionOperation,
+) -> Result<CrawlRun>
+where
+    P: EmbeddingProvider,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<P>>,
+{
+    let mut progress = ingest_text(store, source, request.clone(), policy, true, operation).await?;
     progress.stage = IngestionStage::Embeddings;
     checkpoint(store, &request, &mut progress).await?;
     let result = async {
@@ -102,7 +160,53 @@ pub async fn ingest_lexical(
     request: CrawlRequest,
     policy: ChunkPolicy,
 ) -> Result<CrawlRun> {
-    let progress = ingest_text(store, source, request.clone(), policy, false).await?;
+    let progress = ingest_text(
+        store,
+        source,
+        request.clone(),
+        policy,
+        false,
+        IngestionOperation::Ingest,
+    )
+    .await?;
+    finish(store, &request, progress, false).await
+}
+
+pub async fn recrawl_lexical(
+    store: &KnowledgeStore,
+    source: Source,
+    request: CrawlRequest,
+    policy: ChunkPolicy,
+) -> Result<CrawlRun> {
+    let progress = ingest_text(
+        store,
+        source,
+        request.clone(),
+        policy,
+        false,
+        IngestionOperation::Recrawl,
+    )
+    .await?;
+    finish(store, &request, progress, false).await
+}
+
+/// Re-extract retained content without HTTP requests. Removed documents stay
+/// unavailable until a successful network fetch restores them.
+pub async fn reprocess_lexical(
+    store: &KnowledgeStore,
+    source: Source,
+    request: CrawlRequest,
+    policy: ChunkPolicy,
+) -> Result<CrawlRun> {
+    let progress = ingest_text(
+        store,
+        source,
+        request.clone(),
+        policy,
+        false,
+        IngestionOperation::Reprocess,
+    )
+    .await?;
     finish(store, &request, progress, false).await
 }
 
@@ -112,17 +216,22 @@ async fn ingest_text(
     request: CrawlRequest,
     policy: ChunkPolicy,
     embeddings_requested: bool,
+    operation: IngestionOperation,
 ) -> Result<IngestionProgress> {
     request.validate()?;
     ensure!(
         request.source_id == source.id && request.seed == source.root_url,
         "crawl request must match the registered source"
     );
-    ensure!(policy.target_chars > 0, "chunk budget must be positive");
+    ensure!(
+        (1..=1_000_000).contains(&policy.target_chars),
+        "chunk budget must be between 1 and 1000000"
+    );
     store.register_source(source).await?;
     store.begin_crawl(&request).await?;
     let now = SystemTime::now();
     let mut progress = IngestionProgress {
+        operation,
         status: IngestionStatus::Running,
         stage: IngestionStage::Crawl,
         started_at: now,
@@ -137,13 +246,60 @@ async fn ingest_text(
     };
     let result = async {
         checkpoint(store, &request, &mut progress).await?;
-        let report = crawl(request.clone()).await?;
+        // Spider's crawl future is large; keep it on the heap so adding the
+        // incremental branch does not exhaust ordinary Tokio worker stacks.
+        let report = match operation {
+            IngestionOperation::Ingest => Box::pin(crawl(request.clone())).await?,
+            IngestionOperation::Recrawl => {
+                Box::pin(crawl_with_cache(
+                    request.clone(),
+                    store.page_cache(&request.source_id).await?,
+                ))
+                .await?
+            }
+            IngestionOperation::Reprocess => {
+                let started_at = SystemTime::now();
+                let cache = store.page_cache(&request.source_id).await?;
+                let mut pages = Vec::new();
+                for raw in cache.urls() {
+                    if pages.len() >= request.max_pages as usize {
+                        break;
+                    }
+                    let url = url::Url::parse(raw)?;
+                    if request.scope.contains(&url)
+                        && let Some(mut page) = cache.get(raw).await?
+                    {
+                        page.crawl_id = request.crawl_id.clone();
+                        pages.push(page);
+                    }
+                }
+                CrawlReport {
+                    source_id: request.source_id.clone(),
+                    crawl_id: request.crawl_id.clone(),
+                    started_at,
+                    finished_at: SystemTime::now(),
+                    pages,
+                    blocked: vec![],
+                    dropped_pages: 0,
+                    audit_overflow: false,
+                }
+            }
+        };
         progress.stage = IngestionStage::Prepare;
         checkpoint(store, &request, &mut progress).await?;
-        let prepared =
+        let prepared = if operation == IngestionOperation::Ingest {
             tokio::task::spawn_blocking(move || prepare_crawl(extract_crawl(report), policy))
                 .await
-                .context("join document preparation")??;
+                .context("join document preparation")??
+        } else {
+            prepare_incremental(
+                store,
+                report,
+                policy,
+                operation == IngestionOperation::Reprocess,
+            )
+            .await?
+        };
         progress.stage = IngestionStage::Persist;
         checkpoint(store, &request, &mut progress).await?;
         store.finish_prepared_crawl(prepared).await
@@ -194,6 +350,10 @@ async fn finish(
         .as_ref()
         .context("completed crawl missing summary")?;
     let incomplete = summary["rejected_count"].as_u64().unwrap_or(0) > 0
+        || summary["incremental"]["unvisited_known"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
         || summary["document_count"].as_u64().unwrap_or(0) == 0
         || summary["delivery_complete"] != true;
     progress.status = if partial || incomplete {

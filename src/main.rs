@@ -2,7 +2,10 @@ use anyhow::{Context, Result, bail};
 use ariadne::{
     crawler::{CrawlRequest, CrawlScope, crawl},
     embeddings::{OllamaConfig, OllamaProvider, index_source},
-    ingestion::{IngestionStatus, extract_crawl, ingest, ingest_lexical},
+    ingestion::{
+        IngestionStatus, extract_crawl, ingest, ingest_lexical, recrawl, recrawl_lexical,
+        reprocess_lexical,
+    },
     retrieval::{SearchMode, SearchQuery, search, vector_search},
     storage::{KnowledgeStore, Source},
 };
@@ -18,7 +21,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
         println!(
-            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--max-pages <n>] [--concurrency <n>]\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
+            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  recrawl <source-id> <crawl-id> [--lexical-only] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  reprocess <source-id> <crawl-id> [--max-pages <n>] [--chunk-chars <n>]\n  source status <source-id>\n  document-status <source-id> <url>\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
         );
         return Ok(());
     }
@@ -30,7 +33,12 @@ async fn main() -> Result<()> {
         .as_slice()
     {
         ["mcp"] => ariadne::mcp::serve_stdio(store, OllamaConfig::from_env()?).await?,
-        ["ingest", source_id, crawl_id, options @ ..] => {
+        [
+            operation @ ("ingest" | "recrawl" | "reprocess"),
+            source_id,
+            crawl_id,
+            options @ ..,
+        ] => {
             let source = store
                 .get_source(source_id)
                 .await?
@@ -39,6 +47,7 @@ async fn main() -> Result<()> {
             let mut request =
                 CrawlRequest::new(*source_id, *crawl_id, source.root_url.clone(), scope);
             let mut lexical_only = false;
+            let mut policy = ariadne::chunking::ChunkPolicy::default();
             let mut cursor = 0;
             while cursor < options.len() {
                 match options[cursor] {
@@ -46,28 +55,43 @@ async fn main() -> Result<()> {
                         lexical_only = true;
                         cursor += 1;
                     }
-                    "--max-pages" | "--concurrency" => {
+                    "--max-pages" | "--concurrency" | "--chunk-chars" => {
                         let value = options
                             .get(cursor + 1)
                             .context("ingest option requires a value")?;
                         if options[cursor] == "--max-pages" {
                             request.max_pages = value.parse()?;
-                        } else {
+                        } else if options[cursor] == "--concurrency" {
                             request.concurrency = value.parse()?;
+                        } else {
+                            policy.target_chars = value.parse()?;
                         }
                         cursor += 2;
                     }
                     _ => bail!("unknown ingest option; use --help"),
                 }
             }
-            let result = if lexical_only {
-                ingest_lexical(&store, source, request, Default::default()).await
+            let result = if *operation == "reprocess" {
+                reprocess_lexical(&store, source, request, policy).await
+            } else if lexical_only {
+                if *operation == "recrawl" {
+                    recrawl_lexical(&store, source, request, policy).await
+                } else {
+                    ingest_lexical(&store, source, request, policy).await
+                }
             } else {
                 let config = OllamaConfig::from_env()?;
-                ingest(&store, source, request, Default::default(), || {
-                    OllamaProvider::connect(config)
-                })
-                .await
+                if *operation == "recrawl" {
+                    recrawl(&store, source, request, policy, || {
+                        OllamaProvider::connect(config)
+                    })
+                    .await
+                } else {
+                    ingest(&store, source, request, policy, || {
+                        OllamaProvider::connect(config)
+                    })
+                    .await
+                }
             };
             let run = store.get_crawl(source_id, crawl_id).await?;
             print_json(&run)?;
@@ -127,6 +151,10 @@ async fn main() -> Result<()> {
                 .await?,
         )?,
         ["source", "list"] => print_json(&store.list_sources().await?)?,
+        ["source", "status", source] => print_json(&store.source_status(source).await?)?,
+        ["document-status", source, url] => {
+            print_json(&store.document_status(source, &Url::parse(url)?).await?)?
+        }
         ["chunks", source, url] => print_json(&store.get_chunks(source, &Url::parse(url)?).await?)?,
         ["indexing", source, url] => print_json(
             &store

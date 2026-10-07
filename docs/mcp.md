@@ -53,6 +53,10 @@ shows current coverage. The original ingestion report remains a historical
 snapshot; retries do not rewrite it. Embedding coverage and generation are
 source-wide, including previously stored chunks from the same source.
 
+Repeat indexing with `recrawl`, inspect `source status` / `document-status`, or
+rebuild retained HTML offline with `reprocess`. See [incremental recrawling](recrawling.md)
+for validation, version changes and conservative removal behavior.
+
 ## MCP client configuration
 
 Configure a stdio server in your MCP client, using an absolute binary path:

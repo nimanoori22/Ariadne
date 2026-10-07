@@ -127,7 +127,8 @@ Filtered scoring costs grow with the selected source's ready vector count.
 Results keep title, heading path, anchors, crawl timestamp, source/chunk IDs and
 hashes. Text is a bounded Unicode prefix, with explicit truncation. Ties are
 ordered by source, URL, sequence and chunk ID; approximate candidate membership
-can vary. Hybrid ranking and MCP are separate roadmap steps.
+can vary. MCP search is implemented; hybrid ranking remains a separate roadmap step.
+[Incremental recrawling](recrawling.md) avoids regenerating unchanged derivatives.
 
 The deterministic suite covers model/dimension isolation, source filtering,
 restart/reuse, failure recovery, invalid vectors, partial input rejection,

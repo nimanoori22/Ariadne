@@ -1,12 +1,17 @@
 //! Structured preparation and auditable foreground ingestion orchestration.
+mod incremental;
 mod service;
 use crate::chunking::{ChunkPolicy, DocumentIndex, index_document};
 use crate::{
     crawler::CrawlReport,
     extraction::{ExtractionOutcome, extract},
 };
+pub(crate) use incremental::{RecrawlPlan, prepare_incremental};
 use serde::{Deserialize, Serialize};
-pub use service::{IngestionProgress, IngestionStage, IngestionStatus, ingest, ingest_lexical};
+pub use service::{
+    IngestionOperation, IngestionProgress, IngestionStage, IngestionStatus, ingest, ingest_lexical,
+    recrawl, recrawl_lexical, reprocess_lexical,
+};
 use std::time::SystemTime;
 
 /// The parallel indexes are private so a caller cannot mismatch documents and
@@ -15,6 +20,7 @@ use std::time::SystemTime;
 pub struct PreparedCrawl {
     pub(crate) batch: ExtractionBatch,
     pub(crate) indexes: Vec<Option<DocumentIndex>>,
+    pub(crate) recrawl: Option<RecrawlPlan>,
 }
 
 pub fn prepare_crawl(batch: ExtractionBatch, policy: ChunkPolicy) -> anyhow::Result<PreparedCrawl> {
@@ -26,7 +32,11 @@ pub fn prepare_crawl(batch: ExtractionBatch, policy: ChunkPolicy) -> anyhow::Res
             ExtractionOutcome::Rejected { .. } => Ok(None),
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(PreparedCrawl { batch, indexes })
+    Ok(PreparedCrawl {
+        batch,
+        indexes,
+        recrawl: None,
+    })
 }
 
 #[derive(Debug, Serialize, Deserialize)]

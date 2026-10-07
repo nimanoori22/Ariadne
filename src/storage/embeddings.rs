@@ -97,14 +97,15 @@ impl KnowledgeStore {
         chunk: &Chunk,
     ) -> Result<bool> {
         let mut result = self
-            .db
-            .query(include_str!("prepare_embedding.surql"))
-            .bind(("table", space.table()))
-            .bind(("chunk_id", chunk.id.clone()))
-            .bind(("hash", chunk.content_sha256.clone()))
-            .bind(("now", serde_json::to_value(SystemTime::now())?))
-            .await?
-            .check()?;
+            .transaction(
+                include_str!("prepare_embedding.surql"),
+                json!({
+                    "table":space.table(),"chunk_id":chunk.id,"hash":chunk.content_sha256,
+                    "now":SystemTime::now()
+                }),
+            )
+            .await
+            .context("prepare embedding")?;
         // The pinned SDK retains BEGIN/LET/IF/COMMIT result slots. Both
         // scripts deliberately return their decision as statement 7.
         result
@@ -121,17 +122,16 @@ impl KnowledgeStore {
     ) -> Result<bool> {
         let success = vector.is_some();
         let mut result = self
-            .db
-            .query(include_str!("complete_embedding.surql"))
-            .bind(("table", space.table()))
-            .bind(("chunk_id", chunk.id.clone()))
-            .bind(("hash", chunk.content_sha256.clone()))
-            .bind(("now", serde_json::to_value(SystemTime::now())?))
-            .bind(("success", success))
-            .bind(("vector", vector.unwrap_or_default()))
-            .bind(("error", error.map(Value::String).unwrap_or(Value::Null)))
-            .await?
-            .check()?;
+            .transaction(
+                include_str!("complete_embedding.surql"),
+                json!({
+                    "table":space.table(),"chunk_id":chunk.id,"hash":chunk.content_sha256,
+                    "now":SystemTime::now(),"success":success,"vector":vector.unwrap_or_default(),
+                    "error":error
+                }),
+            )
+            .await
+            .context("complete embedding")?;
         result
             .take::<Option<bool>>(7)?
             .context("embedding completion missing result")

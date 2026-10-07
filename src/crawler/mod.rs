@@ -1,4 +1,6 @@
 //! Bounded static crawling through Spider. Engine-specific types stay here.
+mod revalidation;
+pub use revalidation::PageCache;
 use std::{
     error::Error,
     fmt,
@@ -151,6 +153,7 @@ fn path_segments(url: &Url) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PageState {
     Fetched,
+    NotModified,
     HttpFailure,
     TransportFailure { message: String },
     Truncated,
@@ -158,7 +161,7 @@ pub enum PageState {
     Blocked,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PageOutcome {
     pub source_id: String,
     pub crawl_id: String,
@@ -217,6 +220,20 @@ impl Error for CrawlError {}
 
 /// Collects a bounded run. Callers must check delivery completeness before ingestion.
 pub async fn crawl(request: CrawlRequest) -> Result<CrawlReport, CrawlError> {
+    crawl_inner(request, None).await
+}
+
+pub async fn crawl_with_cache(
+    request: CrawlRequest,
+    cache: Arc<dyn PageCache>,
+) -> Result<CrawlReport, CrawlError> {
+    crawl_inner(request, Some(cache)).await
+}
+
+async fn crawl_inner(
+    request: CrawlRequest,
+    cache: Option<Arc<dyn PageCache>>,
+) -> Result<CrawlReport, CrawlError> {
     request.validate()?;
     tracing::info!(source_id = %request.source_id, crawl_id = %request.crawl_id, seed = %request.seed, "starting crawl");
     let started_at = SystemTime::now();
@@ -306,6 +323,38 @@ pub async fn crawl(request: CrawlRequest) -> Result<CrawlReport, CrawlError> {
         .redirect(policy)
         .build()
         .map_err(|error| CrawlError(error.to_string()))?;
+    let (revalidation_tx, revalidation_rx) = mpsc::sync_channel(request.audit_capacity);
+    if let Some(cache) = cache {
+        if request.max_pages > 1 {
+            website.set_extra_links(
+                cache
+                    .urls()
+                    .iter()
+                    .filter_map(|raw| {
+                        let url = Url::parse(raw).ok()?;
+                        (request.scope.contains(&url)
+                            && request
+                                .max_path_segments
+                                .is_none_or(|max| path_segments(&url) <= max))
+                        .then(|| raw.clone().into())
+                    })
+                    .collect(),
+            );
+            // Spider's setup clears an initial Website's extra links unless its
+            // status is Active. Keep the seed explicitly when setup skips it.
+            let mut seeds = website.get_extra_links().clone();
+            seeds.insert(request.seed.to_string().into());
+            website.set_extra_links(seeds);
+            website.persist_links();
+        }
+        website.with_fetch_engine(revalidation::RevalidationEngine {
+            client: client.clone(),
+            cache,
+            request: request.clone(),
+            audit: revalidation_tx,
+            overflow: Arc::clone(&overflow),
+        });
+    }
     website.set_http_client(client);
     let mut receiver = website.subscribe(request.subscription_capacity);
     let collect = async {
@@ -334,6 +383,15 @@ pub async fn crawl(request: CrawlRequest) -> Result<CrawlReport, CrawlError> {
         website.unsubscribe();
     };
     let (_, (mut pages, dropped_pages)) = tokio::join!(run, collect);
+    let mut revalidated: std::collections::HashMap<_, _> = revalidation_rx
+        .try_iter()
+        .map(|page| (page.requested_url.clone(), page))
+        .collect();
+    for page in &mut pages {
+        if let Some(actual) = revalidated.remove(&page.requested_url) {
+            *page = actual;
+        }
+    }
     let mut blocked: Vec<_> = audit_rx.try_iter().collect();
     // Arrival order depends on network timing; expose deterministic result ordering.
     pages.sort_by(|a, b| a.requested_url.cmp(&b.requested_url));

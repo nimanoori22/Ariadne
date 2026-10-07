@@ -1,5 +1,6 @@
 //! Embedded SurrealDB and the sole SurrealQL boundary.
 mod embeddings;
+mod recrawl;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -238,8 +239,7 @@ impl KnowledgeStore {
             error: None,
             ingestion: None,
         };
-        self.db.query("BEGIN TRANSACTION; IF !record::exists(type::record('source', $source_id)) { THROW 'unknown source'; }; CREATE ONLY type::record('crawl_run', [$source_id, $crawl_id]) SET source = type::record('source', $source_id), status = 'running', data = $data; COMMIT TRANSACTION;")
-            .bind(("source_id", request.source_id.clone())).bind(("crawl_id", request.crawl_id.clone())).bind(("data", serde_json::to_value(run)?)).await?.check()?;
+        self.transaction("BEGIN TRANSACTION; IF !record::exists(type::record('source', $source_id)) { THROW 'unknown source'; }; IF array::len(SELECT id FROM crawl_run WHERE source = type::record('source', $source_id) AND status = 'running' LIMIT 1) > 0 { THROW 'source already has a running crawl'; }; CREATE ONLY type::record('crawl_run', [$source_id, $crawl_id]) SET source = type::record('source', $source_id), status = 'running', data = $data; COMMIT TRANSACTION;", json!({"source_id":request.source_id,"crawl_id":request.crawl_id,"data":run})).await.context("begin crawl")?;
         Ok(())
     }
 
@@ -272,9 +272,7 @@ impl KnowledgeStore {
         crawl_id: &str,
         progress: &crate::ingestion::IngestionProgress,
     ) -> Result<()> {
-        self.db.query("BEGIN TRANSACTION; LET $run = type::record('crawl_run', [$source_id, $crawl_id]); IF !record::exists($run) { THROW 'unknown crawl'; }; UPDATE $run SET data.ingestion = $progress; COMMIT TRANSACTION;")
-            .bind(("source_id", source_id.to_owned())).bind(("crawl_id", crawl_id.to_owned()))
-            .bind(("progress", serde_json::to_value(progress)?)).await?.check()?;
+        self.transaction("BEGIN TRANSACTION; LET $run = type::record('crawl_run', [$source_id, $crawl_id]); IF !record::exists($run) { THROW 'unknown crawl'; }; UPDATE $run SET data.ingestion = $progress; COMMIT TRANSACTION;", json!({"source_id":source_id,"crawl_id":crawl_id,"progress":progress})).await.context("checkpoint ingestion")?;
         Ok(())
     }
 
@@ -288,7 +286,11 @@ impl KnowledgeStore {
     /// Persist a preparation performed outside the database boundary. A custom
     /// chunk policy can be supplied to ingestion::prepare_crawl.
     pub async fn finish_prepared_crawl(&self, prepared: PreparedCrawl) -> Result<()> {
-        let PreparedCrawl { batch, indexes } = prepared;
+        let PreparedCrawl {
+            batch,
+            indexes,
+            recrawl,
+        } = prepared;
         ensure!(
             batch.finished_at >= batch.started_at,
             "crawl finished before it started"
@@ -352,18 +354,123 @@ impl KnowledgeStore {
             .iter()
             .filter_map(|document| document["data"]["indexing"]["oversized_chunk_count"].as_u64())
             .sum();
-        let summary = json!({"started_at": batch.started_at, "finished_at": batch.finished_at, "page_count": pages.len(), "document_count": documents.len(), "chunk_count": chunk_count, "oversized_chunk_count": oversized_chunk_count, "alias_count": extracted_count - documents.len(), "rejected_count": pages.len() - extracted_count, "blocked": batch.blocked, "dropped_pages": batch.dropped_pages, "audit_overflow": batch.audit_overflow, "delivery_complete": batch.dropped_pages == 0 && !batch.audit_overflow});
-        self.db
-            .query(include_str!("finish_crawl.surql"))
-            .bind(("source_id", batch.source_id))
-            .bind(("crawl_id", batch.crawl_id))
-            .bind(("pages", pages))
-            .bind(("documents", documents))
-            .bind(("summary", summary))
-            .bind(("finished", serde_json::to_value(batch.finished_at)?))
-            .await?
-            .check()?;
+        let rejected_count = pages.len() - extracted_count;
+        let mut reused = Vec::new();
+        let mut removed = Vec::new();
+        let mut incremental = Value::Null;
+        if let Some(plan) = recrawl {
+            for document in &mut documents {
+                if let Some(validation) = document["url"]
+                    .as_str()
+                    .and_then(|url| plan.validations.get(url))
+                {
+                    document["validation"] = validation.clone();
+                }
+            }
+            if plan.offline {
+                for page in &mut pages {
+                    page["processing"] = json!("retained_raw");
+                }
+            }
+            for reuse in plan.reused {
+                ensure!(
+                    reuse.page.source_id == batch.source_id
+                        && reuse.page.crawl_id == batch.crawl_id,
+                    "reused page provenance does not match crawl"
+                );
+                let kind = serde_json::to_value(&reuse.kind)?;
+                let page = serde_json::to_value(&reuse.page)?;
+                let refreshed = reuse
+                    .refreshed
+                    .map(|doc| -> Result<Value> {
+                        let mut value = serde_json::to_value(doc)?;
+                        value
+                            .as_object_mut()
+                            .context("document must be an object")?
+                            .remove("sections");
+                        Ok(value)
+                    })
+                    .transpose()?;
+                pages.push(json!({"page":page,"extraction":"unchanged","reuse":kind}));
+                reused.push(json!({"url":reuse.url,"page":page,"indexing":reuse.indexing,"kind":kind,"refreshed":refreshed}));
+            }
+            for page in plan.removed {
+                ensure!(
+                    page.source_id == batch.source_id
+                        && page.crawl_id == batch.crawl_id
+                        && matches!(page.status, 404 | 410)
+                        && page.state == crate::crawler::PageState::HttpFailure,
+                    "invalid confirmed removal"
+                );
+                removed.push(json!({"url":page.final_url,"page":page}));
+                pages.push(json!({"page":page,"extraction":"removed"}));
+            }
+            for page in plan.audit_overrides {
+                ensure!(
+                    page.source_id == batch.source_id && page.crawl_id == batch.crawl_id,
+                    "reprocessing provenance does not match crawl"
+                );
+                if let Some(audit) = pages
+                    .iter_mut()
+                    .find(|v| v["page"]["requested_url"] == page.requested_url)
+                {
+                    audit["page"] = serde_json::to_value(page)?;
+                    audit["processing"] = json!("retained_raw");
+                }
+            }
+            incremental = json!({"added":plan.added,"changed":plan.changed,"reprocessed":plan.reprocessed,
+                "unchanged":reused.len(),"removed":removed.len(),"absence_pruning":false,
+                "coverage":"not_proven","known_documents":plan.known_documents,"unvisited_known":plan.unvisited_known});
+        }
+        let summary = json!({"started_at": batch.started_at, "finished_at": batch.finished_at, "page_count": pages.len(), "document_count": documents.len() + reused.len(), "chunk_count": chunk_count, "oversized_chunk_count": oversized_chunk_count, "alias_count": extracted_count - documents.len(), "rejected_count": rejected_count, "removed_count":removed.len(),"incremental":incremental,"blocked": batch.blocked, "dropped_pages": batch.dropped_pages, "audit_overflow": batch.audit_overflow, "delivery_complete": batch.dropped_pages == 0 && !batch.audit_overflow});
+        self.transaction(
+            include_str!("finish_crawl.surql"),
+            json!({
+                "source_id":batch.source_id,"crawl_id":batch.crawl_id,
+                "pages":pages,"documents":documents,"reused":reused,"removed":removed,
+                "summary":summary,"finished":batch.finished_at
+            }),
+        )
+        .await
+        .context("commit crawl batch")?;
         Ok(())
+    }
+
+    /// Only explicit, rolled-back transaction write conflicts are retried.
+    /// Queries passed here must enclose their writes in one transaction.
+    async fn transaction(&self, sql: &str, bindings: Value) -> Result<surrealdb::IndexedResults> {
+        for attempt in 0..5 {
+            let mut response = self.db.query(sql.to_owned()).bind(bindings.clone()).await?;
+            let mut errors: Vec<_> = response.take_errors().into_iter().collect();
+            errors.sort_by_key(|(index, _)| *index);
+            if !errors.is_empty() {
+                // Rollback marks earlier statements QueryNotExecuted. Surface the
+                // actual failed statement instead of hiding its cause behind that.
+                let position = errors
+                    .iter()
+                    .position(|(_, error)| !error.to_string().contains("query was not executed"))
+                    .unwrap_or(0);
+                if attempt < 4
+                    && errors[position]
+                        .1
+                        .to_string()
+                        .contains("Transaction write conflict")
+                {
+                    // HNSW maintenance may race replacement. Retry only this fully
+                    // rolled-back transaction, with a bounded number of attempts.
+                    tracing::warn!(
+                        attempt,
+                        "retrying storage transaction after transaction write conflict"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(25 << attempt)).await;
+                    continue;
+                }
+                return Err(anyhow::Error::from(errors.swap_remove(position).1)
+                    .context("evaluate storage transaction"));
+            }
+            return Ok(response);
+        }
+        unreachable!("last transaction attempt returns an error")
     }
 
     pub async fn get_chunks(&self, source_id: &str, url: &Url) -> Result<Vec<Chunk>> {
