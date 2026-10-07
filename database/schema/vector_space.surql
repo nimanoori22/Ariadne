@@ -1,0 +1,9 @@
+DEFINE TABLE ${TABLE} SCHEMAFULL;
+DEFINE FIELD chunk ON ${TABLE} TYPE record<chunk>;
+DEFINE FIELD document ON ${TABLE} TYPE record<document>;
+DEFINE FIELD source_id ON ${TABLE} TYPE string;
+DEFINE FIELD vector ON ${TABLE} TYPE option<array<float>>;
+DEFINE FIELD data ON ${TABLE} TYPE object FLEXIBLE;
+DEFINE INDEX by_source ON ${TABLE} FIELDS source_id;
+DEFINE INDEX by_document ON ${TABLE} FIELDS document;
+DEFINE INDEX vector_search ON ${TABLE} FIELDS vector HNSW DIMENSION ${DIMENSIONS} DIST COSINE TYPE F64 EFC 150 M 12;

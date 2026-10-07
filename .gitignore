@@ -1,0 +1,31 @@
+# Rust build output
+/target/
+
+# Local application data and downloaded embedding models
+/knowledge/
+/data/
+/.ariadne/
+/ollama-models/
+*.gguf
+
+# Local environment and credentials; keep shareable example configurations
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.template
+/.aws/
+
+# Machine-specific agent state and caches
+/.codex/
+/.agents/
+/.cache/
+
+# Logs and editor/OS temporary files
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

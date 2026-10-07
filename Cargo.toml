@@ -1,0 +1,32 @@
+[package]
+name = "Ariadne"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "ariadne"
+
+[dependencies]
+spider = { version = "=2.53.9", default-features = false, features = ["sync", "regex", "headers", "page_error_status_details"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "signal"] }
+url = { version = "2", features = ["serde"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io"] }
+scraper = { package = "spider_scraper", version = "=0.1.2" }
+surrealdb = { version = "=3.3.0", default-features = false, features = ["kv-surrealkv"] }
+surrealkit = { version = "=1.0.0-beta.6", default-features = false }
+anyhow = "1"
+serde_json = "1"
+directories = "6"
+sha2 = "0.10"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+rmcp = { version = "=3.5.1", default-features = false, features = ["client", "transport-child-process"] }
+spider = { version = "=2.53.9", default-features = false, features = ["serde"] }
+tokio = { version = "1", features = ["net", "io-util"] }
+spider_transformations = { version = "=2.39.13", default-features = false }
+tempfile = "3"

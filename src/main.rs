@@ -1,0 +1,201 @@
+use anyhow::{Context, Result, bail};
+use ariadne::{
+    crawler::{CrawlRequest, CrawlScope, crawl},
+    embeddings::{OllamaConfig, OllamaProvider, index_source},
+    ingestion::{IngestionStatus, extract_crawl, ingest, ingest_lexical},
+    retrieval::{SearchMode, SearchQuery, search, vector_search},
+    storage::{KnowledgeStore, Source},
+};
+use url::Url;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .init();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
+        println!(
+            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--max-pages <n>] [--concurrency <n>]\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
+        );
+        return Ok(());
+    }
+    let store = KnowledgeStore::open_default().await?;
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["mcp"] => ariadne::mcp::serve_stdio(store, OllamaConfig::from_env()?).await?,
+        ["ingest", source_id, crawl_id, options @ ..] => {
+            let source = store
+                .get_source(source_id)
+                .await?
+                .context("source not found; use source add")?;
+            let scope = CrawlScope::new(source.root_url.clone(), source.root_url.path())?;
+            let mut request =
+                CrawlRequest::new(*source_id, *crawl_id, source.root_url.clone(), scope);
+            let mut lexical_only = false;
+            let mut cursor = 0;
+            while cursor < options.len() {
+                match options[cursor] {
+                    "--lexical-only" => {
+                        lexical_only = true;
+                        cursor += 1;
+                    }
+                    "--max-pages" | "--concurrency" => {
+                        let value = options
+                            .get(cursor + 1)
+                            .context("ingest option requires a value")?;
+                        if options[cursor] == "--max-pages" {
+                            request.max_pages = value.parse()?;
+                        } else {
+                            request.concurrency = value.parse()?;
+                        }
+                        cursor += 2;
+                    }
+                    _ => bail!("unknown ingest option; use --help"),
+                }
+            }
+            let result = if lexical_only {
+                ingest_lexical(&store, source, request, Default::default()).await
+            } else {
+                let config = OllamaConfig::from_env()?;
+                ingest(&store, source, request, Default::default(), || {
+                    OllamaProvider::connect(config)
+                })
+                .await
+            };
+            let run = store.get_crawl(source_id, crawl_id).await?;
+            print_json(&run)?;
+            result?;
+            if run
+                .and_then(|r| r.ingestion)
+                .is_some_and(|p| p.status != IngestionStatus::Completed)
+            {
+                bail!(
+                    "ingestion is partial; inspect run and embeddings status; retry embeddings with embed"
+                );
+            }
+        }
+        [] => println!("Ariadne database ready: {}", store.path().display()),
+        ["search", query, options @ ..] => {
+            print_json(&search(&store, search_query(query, options)?).await?)?
+        }
+        ["embed", source] => {
+            store
+                .get_source(source)
+                .await?
+                .context("source not found")?;
+            let provider = OllamaProvider::connect(OllamaConfig::from_env()?).await?;
+            let report = index_source(&store, &provider, source).await?;
+            print_json(&report)?;
+            if report.failed > 0 {
+                bail!(
+                    "{} chunks failed embedding; inspect embeddings status and rerun embed",
+                    report.failed
+                );
+            }
+        }
+        ["embeddings", "spaces"] => print_json(&store.list_embedding_spaces().await?)?,
+        ["embeddings", "status", source] => {
+            store
+                .get_source(source)
+                .await?
+                .context("source not found")?;
+            let mut states = Vec::new();
+            for space in store.list_embedding_spaces().await? {
+                states.push(serde_json::json!({"space": space, "coverage": store.embedding_coverage(&space, source).await?, "states": store.embedding_states(&space, source).await?}));
+            }
+            print_json(&states)?;
+        }
+        ["vector-search", query, options @ ..] => {
+            let request = search_query(query, options)?;
+            request.validate()?;
+            if request.mode != SearchMode::Auto {
+                bail!("lexical match modes do not apply to vector search");
+            }
+            let provider = OllamaProvider::connect(OllamaConfig::from_env()?).await?;
+            print_json(&vector_search(&store, &provider, request).await?)?;
+        }
+        ["source", "add", id, name, url] => print_json(
+            &store
+                .register_source(Source::new(*id, *name, Url::parse(url)?)?)
+                .await?,
+        )?,
+        ["source", "list"] => print_json(&store.list_sources().await?)?,
+        ["chunks", source, url] => print_json(&store.get_chunks(source, &Url::parse(url)?).await?)?,
+        ["indexing", source, url] => print_json(
+            &store
+                .get_indexing(source, &Url::parse(url)?)
+                .await?
+                .context("document has not been indexed")?,
+        )?,
+        ["run", source, run] => print_json(
+            &store
+                .get_crawl(source, run)
+                .await?
+                .context("crawl not found")?,
+        )?,
+        ["document", source, url] => print_json(
+            &store
+                .get_document(source, &Url::parse(url)?)
+                .await?
+                .context("document not found")?,
+        )?,
+        ["crawl", source_id, crawl_id] => {
+            let source = store
+                .get_source(source_id)
+                .await?
+                .context("source not found")?;
+            let scope = CrawlScope::new(source.root_url.clone(), source.root_url.path())?;
+            let request = CrawlRequest::new(*source_id, *crawl_id, source.root_url, scope);
+            store.begin_crawl(&request).await?;
+            let result = async {
+                let report = crawl(request).await?;
+                store.finish_crawl(extract_crawl(report)).await
+            }
+            .await;
+            if let Err(error) = result {
+                store
+                    .fail_crawl(source_id, crawl_id, &format!("{error:#}"))
+                    .await
+                    .context("record crawl failure")?;
+                return Err(error);
+            }
+            print_json(&store.get_crawl(source_id, crawl_id).await?)?;
+        }
+        _ => bail!("invalid arguments; use --help"),
+    }
+    Ok(())
+}
+
+fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn search_query(query: &str, options: &[&str]) -> Result<SearchQuery> {
+    let mut request = SearchQuery::new(query);
+    let (pairs, remainder) = options.as_chunks::<2>();
+    if !remainder.is_empty() {
+        bail!("search options require a flag and value");
+    }
+    for pair in pairs {
+        match pair {
+            ["--source", source] => request.source_id = Some((*source).to_owned()),
+            ["--limit", limit] => request.limit = limit.parse().context("invalid search limit")?,
+            ["--max-chars", budget] => {
+                request.max_text_chars = budget.parse().context("invalid search text budget")?
+            }
+            ["--mode", "auto"] => request.mode = SearchMode::Auto,
+            ["--mode", "keywords"] => request.mode = SearchMode::Keywords,
+            ["--mode", "exact"] => request.mode = SearchMode::Exact,
+            _ => bail!("unknown search option; use --help"),
+        }
+    }
+    Ok(request)
+}
