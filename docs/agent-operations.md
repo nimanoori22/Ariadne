@@ -17,6 +17,7 @@ default. Administrators enable crawling for specific registered source IDs:
   "env": {
     "ARIADNE_DATA_DIR": "/your/durable/data",
     "ARIADNE_MCP_CRAWL_SOURCES": "reqwest,surrealdb",
+    "ARIADNE_BROWSER_FALLBACK": "1",
     "ARIADNE_OLLAMA_URL": "http://127.0.0.1:11434/",
     "ARIADNE_EMBED_MODEL": "embeddinggemma:latest"
   }
@@ -44,6 +45,11 @@ For an explicitly trusted internal documentation source, the administrator can s
 allowlisted sources in that process; it cannot be requested by a tool caller.
 Keep that allowlist narrow. Trusted foreground CLI crawls retain their existing
 network behavior.
+
+`ARIADNE_BROWSER_FALLBACK=1` enables guarded Chromium rendering for eligible
+JavaScript documentation shells in MCP crawl jobs. It is disabled by default and
+requires a local Chromium executable; see [browser fallback](browser-fallback.md).
+MCP callers cannot toggle this setting per job.
 
 ## Tools
 

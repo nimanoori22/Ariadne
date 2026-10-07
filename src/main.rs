@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
         println!(
-            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--discover] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  recrawl <source-id> <crawl-id> [--lexical-only] [--discover] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  reprocess <source-id> <crawl-id> [--max-pages <n>] [--chunk-chars <n>]\n  source status <source-id>\n  document-status <source-id> <url>\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  hybrid-search <query> [--source <id>] [--limit <n>]\n  retrieve <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>] [--neighbors <n>] [--context-chars <n>]\n  Search filters: --url-prefix <url> --heading <heading> --crawled-after <unix-seconds>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
+            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  recrawl <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  reprocess <source-id> <crawl-id> [--max-pages <n>] [--chunk-chars <n>]\n  source status <source-id>\n  document-status <source-id> <url>\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  hybrid-search <query> [--source <id>] [--limit <n>]\n  retrieve <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>] [--neighbors <n>] [--context-chars <n>]\n  Search filters: --url-prefix <url> --heading <heading> --crawled-after <unix-seconds>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
         );
         return Ok(());
     }
@@ -54,6 +54,14 @@ async fn main() -> Result<()> {
             let mut cursor = 0;
             while cursor < options.len() {
                 match options[cursor] {
+                    "--browser-fallback" => {
+                        ensure!(
+                            *operation != "reprocess",
+                            "browser rendering applies to network ingestion only"
+                        );
+                        request.browser_fallback = true;
+                        cursor += 1;
+                    }
                     "--discover" => {
                         ensure!(
                             *operation != "reprocess",

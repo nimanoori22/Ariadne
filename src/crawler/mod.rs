@@ -1,4 +1,6 @@
 //! Bounded static crawling through Spider. Engine-specific types stay here.
+mod browser;
+pub use browser::RenderMetadata;
 mod discovery;
 mod revalidation;
 pub use discovery::DiscoveryReport;
@@ -100,6 +102,8 @@ pub struct CrawlRequest {
     pub public_network_only: bool,
     #[serde(default)]
     pub discovery: bool,
+    #[serde(default)]
+    pub browser_fallback: bool,
 }
 
 impl CrawlRequest {
@@ -126,6 +130,7 @@ impl CrawlRequest {
             allow_loopback_redirects: false,
             public_network_only: false,
             discovery: false,
+            browser_fallback: false,
         }
     }
 
@@ -179,6 +184,7 @@ pub enum PageState {
     Truncated,
     BodyTooLarge,
     Blocked,
+    RenderFailure,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +198,8 @@ pub struct PageOutcome {
     pub headers: Vec<(String, Vec<u8>)>,
     pub raw_body: Vec<u8>,
     pub content_truncated: bool,
+    #[serde(default)]
+    pub rendering: Option<RenderMetadata>,
     pub state: PageState,
 }
 
@@ -349,12 +357,29 @@ async fn crawl_inner(
     let client = builder
         .build()
         .map_err(|error| CrawlError(error.to_string()))?;
+    // Resource redirects must return to Chromium's interception loop so every
+    // destination receives its own scope and robots check before being fetched.
+    let render_client = if request.browser_fallback {
+        let mut builder = website
+            .configure_http_client_builder()
+            .no_proxy()
+            .redirect(spider::client::redirect::Policy::none());
+        if request.public_network_only {
+            builder = builder.dns_resolver(network::resolver());
+        }
+        builder
+            .build()
+            .map_err(|error| CrawlError(error.to_string()))?
+    } else {
+        client.clone()
+    };
     let mut discovery_report = DiscoveryReport::default();
     let mut seeds = std::collections::BTreeSet::new();
-    if request.discovery && request.max_pages > 1 {
-        // Discovery precedes crawl_raw's normal connector initialization.
+    if request.browser_fallback || (request.discovery && request.max_pages > 1) {
         spider::utils::connect::init_background_runtime();
         website.configure_robots_parser(&client).await;
+    }
+    if request.discovery && request.max_pages > 1 {
         // Manifests do not follow redirects: every probed URL receives its
         // own scope and robots check before any request is sent.
         let mut manifests = website
@@ -387,13 +412,19 @@ async fn crawl_inner(
         website.persist_links();
     }
     let (revalidation_tx, revalidation_rx) = mpsc::sync_channel(request.audit_capacity);
-    if let Some(cache) = cache {
+    let (render_tx, render_rx) = mpsc::sync_channel(request.audit_capacity);
+    let renderer = Arc::new(browser::Renderer::default());
+    if cache.is_some() || request.browser_fallback {
         website.with_fetch_engine(revalidation::RevalidationEngine {
             client: client.clone(),
+            render_client,
             cache,
             request: request.clone(),
             audit: revalidation_tx,
             overflow: Arc::clone(&overflow),
+            renderer: renderer.clone(),
+            render_audit: render_tx,
+            robots: website.get_robots_parser().clone(),
         });
     }
     website.set_http_client(client);
@@ -420,7 +451,7 @@ async fn crawl_inner(
         (pages, dropped_pages)
     };
     let run = async {
-        website.crawl().await;
+        Box::pin(website.crawl_raw()).await;
         website.unsubscribe();
     };
     let (_, (mut pages, dropped_pages)) = tokio::join!(run, collect);
@@ -431,6 +462,16 @@ async fn crawl_inner(
     for page in &mut pages {
         if let Some(actual) = revalidated.remove(&page.requested_url) {
             *page = actual;
+        }
+    }
+    renderer.shutdown().await;
+    let renders: std::collections::HashMap<_, _> = render_rx.try_iter().collect();
+    for page in &mut pages {
+        if let Some(metadata) = renders.get(&page.requested_url) {
+            if metadata.outcome != "rendered" {
+                page.state = PageState::RenderFailure;
+            }
+            page.rendering = Some(metadata.clone());
         }
     }
     let mut blocked: Vec<_> = audit_rx.try_iter().collect();
@@ -507,6 +548,7 @@ fn page_outcome(page: Page, request: &CrawlRequest) -> PageOutcome {
             Vec::new()
         },
         content_truncated: page.content_truncated,
+        rendering: None,
         state,
     }
 }

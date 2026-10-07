@@ -136,6 +136,7 @@ impl Fixture {
         CrawlAccess {
             allowed_sources: ["alpha".into(), "beta".into()].into(),
             allow_private_network: true,
+            browser_fallback: false,
         }
     }
 }
@@ -359,6 +360,7 @@ async fn admission_is_prompt_cancellation_is_durable_and_limits_are_enforced() {
         CrawlAccess {
             allowed_sources: ["alpha".into()].into(),
             allow_private_network: false,
+            browser_fallback: false,
         },
     );
     assert!(

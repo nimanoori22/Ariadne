@@ -117,6 +117,7 @@ async fn ingest(store: &KnowledgeStore, source: &str, run: &str, pages: &[(&str,
                 headers: vec![],
                 raw_body: html.as_bytes().to_vec(),
                 content_truncated: false,
+                rendering: None,
                 state: PageState::Fetched,
             })
         })

@@ -54,6 +54,7 @@ fn page(run: &str, html: &str) -> PageOutcome {
         headers: vec![("content-type".into(), b"text/html; charset=utf-8".to_vec())],
         raw_body: html.as_bytes().to_vec(),
         content_truncated: false,
+        rendering: None,
         state: PageState::Fetched,
     }
 }

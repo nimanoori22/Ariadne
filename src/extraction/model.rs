@@ -114,7 +114,7 @@ pub enum ExtractionFailure {
 pub enum ExtractionOutcome {
     Extracted(Box<ExtractedDocument>),
     Rejected {
-        page: PageOutcome,
+        page: Box<PageOutcome>,
         reason: ExtractionFailure,
     },
 }

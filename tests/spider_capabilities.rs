@@ -189,7 +189,7 @@ async fn crawl(mut crawler: Website) -> Vec<Page> {
             }
         }
     });
-    timeout(Duration::from_secs(15), crawler.crawl())
+    timeout(Duration::from_secs(15), Box::pin(crawler.crawl_raw()))
         .await
         .expect("crawl timed out");
     crawler.unsubscribe();

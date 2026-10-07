@@ -58,6 +58,7 @@ pub struct JobSnapshot {
 pub struct CrawlAccess {
     pub allowed_sources: HashSet<String>,
     pub allow_private_network: bool,
+    pub browser_fallback: bool,
 }
 impl CrawlAccess {
     pub fn from_env() -> Result<Self> {
@@ -76,7 +77,13 @@ impl CrawlAccess {
             Some("1") => true,
             _ => anyhow::bail!("ARIADNE_MCP_ALLOW_PRIVATE_NETWORK must be 0 or 1"),
         };
+        let browser_fallback = match std::env::var("ARIADNE_BROWSER_FALLBACK").ok().as_deref() {
+            None | Some("0") => false,
+            Some("1") => true,
+            _ => anyhow::bail!("ARIADNE_BROWSER_FALLBACK must be 0 or 1"),
+        };
         Ok(Self {
+            browser_fallback,
             allowed_sources,
             allow_private_network,
         })
@@ -159,6 +166,7 @@ impl JobManager {
         request.public_network_only = !self.access.allow_private_network;
         request.allow_loopback_redirects = self.access.allow_private_network;
         request.discovery = discovery;
+        request.browser_fallback = self.access.browser_fallback;
         request.validate()?;
         let job = JobRecord {
             id: id.clone(),

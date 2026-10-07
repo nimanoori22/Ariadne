@@ -24,7 +24,11 @@ pub trait PageCache: Send + Sync {
 
 pub(super) struct RevalidationEngine {
     pub client: Client,
-    pub cache: Arc<dyn PageCache>,
+    pub render_client: Client,
+    pub cache: Option<Arc<dyn PageCache>>,
+    pub renderer: Arc<super::browser::Renderer>,
+    pub render_audit: mpsc::SyncSender<(String, super::browser::RenderMetadata)>,
+    pub robots: Option<Box<spider::packages::robotparser::parser::RobotFileParser>>,
     pub request: CrawlRequest,
     pub audit: mpsc::SyncSender<PageOutcome>,
     pub overflow: Arc<AtomicBool>,
@@ -77,20 +81,27 @@ fn validators(page: &PageOutcome) -> HeaderMap {
 #[async_trait]
 impl HttpFetchEngine for RevalidationEngine {
     fn should_fetch(&self, url: &str) -> bool {
-        self.cache
-            .urls()
-            .binary_search_by(|saved| saved.as_str().cmp(url))
-            .is_ok()
+        self.request.browser_fallback
+            || self.cache.as_ref().is_some_and(|cache| {
+                cache
+                    .urls()
+                    .binary_search_by(|saved| saved.as_str().cmp(url))
+                    .is_ok()
+            })
     }
 
     async fn fetch(&self, req: EngineRequest<'_>) -> Result<EngineResponse, EngineError> {
-        let saved = self
-            .cache
-            .get(req.url)
-            .await
-            .map_err(|_| EngineError::Other("read persisted page cache".into()))?;
+        let saved = if let Some(cache) = &self.cache {
+            cache
+                .get(req.url)
+                .await
+                .map_err(|_| EngineError::Other("read persisted page cache".into()))?
+        } else {
+            None
+        };
         let saved = saved.filter(|page| {
-            page.state == PageState::Fetched
+            page.rendering.is_none()
+                && page.state == PageState::Fetched
                 && page.status == 200
                 && !page.content_truncated
                 && !page.raw_body.is_empty()
@@ -135,6 +146,7 @@ impl HttpFetchEngine for RevalidationEngine {
                     .collect(),
                 raw_body: vec![],
                 content_truncated: false,
+                rendering: None,
                 state: PageState::NotModified,
             };
             if self.audit.try_send(page).is_err() {
@@ -173,14 +185,34 @@ impl HttpFetchEngine for RevalidationEngine {
                 break;
             }
         }
-        Ok(EngineResponse {
+        let mut result = EngineResponse {
             status_code,
             final_url,
             headers,
             body,
             served: true,
             ..Default::default()
-        })
+        };
+        if self.request.browser_fallback
+            && let Some(metadata) = self
+                .renderer
+                .upgrade(
+                    &self.render_client,
+                    &self.request,
+                    req.url,
+                    &mut result,
+                    self.robots.as_deref(),
+                )
+                .await
+            && self
+                .render_audit
+                .try_send((req.url.to_owned(), metadata))
+                .is_err()
+        {
+            self.overflow.store(true, Ordering::Relaxed);
+            return Err(EngineError::Other("render audit overflow".into()));
+        }
+        Ok(result)
     }
 }
 

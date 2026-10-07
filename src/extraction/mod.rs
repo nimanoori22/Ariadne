@@ -29,7 +29,10 @@ pub fn extract(page: PageOutcome) -> ExtractionOutcome {
             diagnostics: parts.diagnostics,
             quality: parts.quality,
         })),
-        Err(reason) => ExtractionOutcome::Rejected { page, reason },
+        Err(reason) => ExtractionOutcome::Rejected {
+            page: Box::new(page),
+            reason,
+        },
     }
 }
 
@@ -537,4 +540,83 @@ fn span(element: ElementRef<'_>, name: &str) -> usize {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(1)
+}
+
+/// Conservative upgrade signal: scripts plus an empty application root or an
+/// explicit loading/JavaScript placeholder. Short static API pages stay HTTP.
+pub(crate) fn browser_candidate(page: &PageOutcome) -> bool {
+    if page.state != PageState::Fetched || page.status != 200 || page.content_truncated {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(&page.raw_body) else {
+        return false;
+    };
+    let dom = Html::parse_document(text);
+    let scripts = dom.select(&selector("script")).any(|s| {
+        !matches!(
+            s.attr("type"),
+            Some("application/ld+json" | "application/json")
+        )
+    });
+    if !scripts {
+        return false;
+    }
+    match extract_html(page) {
+        Err(ExtractionFailure::EmptyContent) => true,
+        Ok(parts) => {
+            let body = render::sections_text(&parts.sections).trim().to_lowercase();
+            let placeholder = body.len() < 200
+                && ["loading", "enable javascript", "javascript is required"]
+                    .iter()
+                    .any(|s| body.contains(s));
+            let empty_app = dom
+                .select(&selector("#app, #root, #__next, [data-reactroot]"))
+                .next()
+                .is_some()
+                && parts.sections.iter().all(|s| s.blocks.is_empty());
+            placeholder || empty_app
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::*;
+    fn page(body: &str) -> PageOutcome {
+        PageOutcome {
+            source_id: "docs".into(),
+            crawl_id: "test".into(),
+            requested_url: "https://example.com/docs/".into(),
+            final_url: "https://example.com/docs/".into(),
+            fetched_at: std::time::SystemTime::now(),
+            status: 200,
+            headers: vec![("content-type".into(), b"text/html".to_vec())],
+            raw_body: body.as_bytes().to_vec(),
+            content_truncated: false,
+            rendering: None,
+            state: PageState::Fetched,
+        }
+    }
+    #[test]
+    fn upgrade_signals_preserve_short_static_and_failed_pages() {
+        assert!(browser_candidate(&page(
+            "<html><main id='app'></main><script src='app.js'></script></html>"
+        )));
+        assert!(browser_candidate(&page(
+            "<html><main><p>Loading documentation...</p></main><script src='app.js'></script></html>"
+        )));
+        assert!(!browser_candidate(&page(
+            "<html><main><h1>API</h1><pre><code>Client::new()</code></pre></main><script src='tracking.js'></script></html>"
+        )));
+        assert!(!browser_candidate(&page(
+            "<html><main><p>A short static API page.</p></main></html>"
+        )));
+        let mut failed = page("<html><main id='app'></main><script></script></html>");
+        failed.status = 403;
+        assert!(!browser_candidate(&failed));
+        failed.status = 200;
+        failed.headers[0].1 = b"application/json".to_vec();
+        assert!(!browser_candidate(&failed));
+    }
 }

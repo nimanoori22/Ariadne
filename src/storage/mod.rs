@@ -636,7 +636,8 @@ mod tests {
         );
         store.begin_crawl(&request).await.unwrap();
         let now = SystemTime::now();
-        let outcome = extract(PageOutcome { source_id: "docs".into(), crawl_id: "existing".into(), requested_url: url.to_string(), final_url: url.to_string(), fetched_at: now, status: 200, headers: vec![], raw_body: b"<title>Proxy</title><main><h1 id='custom'>Custom configuration</h1><p>Proxy::custom() supports custom SOCKS proxies.</p></main>".to_vec(), content_truncated: false, state: PageState::Fetched });
+        let outcome = extract(PageOutcome { source_id: "docs".into(), crawl_id: "existing".into(), requested_url: url.to_string(), final_url: url.to_string(), fetched_at: now, status: 200, headers: vec![], raw_body: b"<title>Proxy</title><main><h1 id='custom'>Custom configuration</h1><p>Proxy::custom() supports custom SOCKS proxies.</p></main>".to_vec(), content_truncated: false,
+        rendering: None, state: PageState::Fetched });
         store
             .finish_crawl(ExtractionBatch {
                 source_id: "docs".into(),
@@ -704,6 +705,7 @@ mod tests {
             headers: vec![],
             raw_body: b"<main><h1>Client</h1><p>Existing documentation.</p></main>".to_vec(),
             content_truncated: false,
+            rendering: None,
             state: PageState::Fetched,
         });
         let ExtractionOutcome::Extracted(document) = outcome else {
@@ -794,6 +796,7 @@ mod tests {
                 )
                 .into_bytes(),
                 content_truncated: false,
+                rendering: None,
                 state: PageState::Fetched,
             })
         };

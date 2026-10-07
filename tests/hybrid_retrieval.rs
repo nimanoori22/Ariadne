@@ -112,6 +112,7 @@ async fn ingest(
                 headers: vec![],
                 raw_body: html.as_bytes().to_vec(),
                 content_truncated: false,
+                rendering: None,
                 state: PageState::Fetched,
             })
         })

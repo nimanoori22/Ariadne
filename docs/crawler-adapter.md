@@ -1,8 +1,9 @@
-# Static crawler adapter
+# Crawler adapter
 
 The `ariadne::crawler` library API wraps pinned Spider 2.53.9. It reuses Spider's
-frontier, fetching, concurrency, robots handling, and link discovery. It does not
-yet provide a CLI command, persistence, browser rendering, or content extraction.
+frontier, HTTP fetching, concurrency, robots handling, and link discovery.
+Ingestion, persistence, extraction, and opt-in guarded Chromium rendering are
+provided by surrounding Ariadne modules. See [browser fallback](browser-fallback.md).
 
 ```rust
 use ariadne::crawler::{crawl, CrawlRequest, CrawlScope, PageState};
@@ -81,8 +82,8 @@ robots rules, failures, and discovery gaps can all leave a source partially visi
 
 ## Verification
 
-`cargo test` exercises eight engine probes and ten adapter/scope tests against
-local fixtures, including permitted redirects, host/path escapes, multi-hop escapes,
-loops, failure metadata, robots audit overflow, invalid configuration, path-depth
-semantics, retained body limits, and request timeouts. Public-site/browser behavior
-has not been validated by these tests.
+`cargo test` exercises deterministic crawler fixtures covering redirects, scope,
+robots, budgets, metadata, and failure paths. The ignored Chromium acceptance
+tests use a local fixture and run with
+`cargo test --test browser_fallback -- --ignored`. Browser behavior on public
+sites remains site dependent.

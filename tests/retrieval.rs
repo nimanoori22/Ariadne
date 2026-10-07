@@ -39,6 +39,7 @@ async fn ingest(store: &KnowledgeStore, source: &str, run: &str, pages: &[(&str,
                 headers: vec![],
                 raw_body: html.as_bytes().to_vec(),
                 content_truncated: false,
+                rendering: None,
                 state: PageState::Fetched,
             })
         })
@@ -316,7 +317,7 @@ async fn replacement_updates_the_search_index_and_rejection_preserves_good_resul
             started_at: UNIX_EPOCH,
             finished_at: UNIX_EPOCH,
             outcomes: vec![ExtractionOutcome::Rejected {
-                page: PageOutcome {
+                page: Box::new(PageOutcome {
                     source_id: "rust".into(),
                     crawl_id: "failed".into(),
                     requested_url: "https://example.test/rust/proxy".into(),
@@ -326,8 +327,9 @@ async fn replacement_updates_the_search_index_and_rejection_preserves_good_resul
                     headers: vec![],
                     raw_body: vec![],
                     content_truncated: false,
+                    rendering: None,
                     state: PageState::HttpFailure,
-                },
+                }),
                 reason: ariadne::extraction::ExtractionFailure::FetchNotSuccessful,
             }],
             blocked: vec![],

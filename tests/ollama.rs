@@ -70,7 +70,8 @@ async fn cli_embeds_resumes_reports_coverage_and_returns_vector_hits() {
         ))
         .await
         .unwrap();
-    let page = extract(PageOutcome { source_id: "docs".into(), crawl_id: "initial".into(), requested_url: url.to_string(), final_url: url.to_string(), fetched_at: UNIX_EPOCH, status: 200, headers: vec![], raw_body: b"<main><h1 id='proxy'>Proxy</h1><p>Proxy configuration routes HTTP requests.</p></main>".to_vec(), content_truncated: false, state: PageState::Fetched });
+    let page = extract(PageOutcome { source_id: "docs".into(), crawl_id: "initial".into(), requested_url: url.to_string(), final_url: url.to_string(), fetched_at: UNIX_EPOCH, status: 200, headers: vec![], raw_body: b"<main><h1 id='proxy'>Proxy</h1><p>Proxy configuration routes HTTP requests.</p></main>".to_vec(), content_truncated: false,
+        rendering: None, state: PageState::Fetched });
     store
         .finish_crawl(ExtractionBatch {
             source_id: "docs".into(),
