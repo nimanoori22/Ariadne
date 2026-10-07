@@ -1,6 +1,7 @@
 //! Embedded SurrealDB and the sole SurrealQL boundary.
 mod embeddings;
 mod recrawl;
+mod retrieval;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -98,6 +99,7 @@ impl KnowledgeStore {
         limit: usize,
         max_text_chars: usize,
         exact_pattern: &str,
+        filter: &crate::retrieval::MetadataFilter,
     ) -> Result<Vec<crate::retrieval::KnowledgeHit>> {
         let mut result = self
             .db
@@ -105,12 +107,18 @@ impl KnowledgeStore {
             .query(format!(
                 "{} {}",
                 include_str!("search_projection.surql"),
-                include_str!("search_text.surql")
+                include_str!("search_text.surql").replace(
+                    "ORDER BY",
+                    &format!("{} ORDER BY", include_str!("metadata_filter.surql"))
+                )
             ))
             .query(format!(
                 "{} {}",
                 include_str!("search_projection.surql"),
-                include_str!("search_title.surql")
+                include_str!("search_title.surql").replace(
+                    "ORDER BY",
+                    &format!("{} ORDER BY", include_str!("metadata_filter.surql"))
+                )
             ))
             .query("COMMIT TRANSACTION;")
             .bind(("query", query.to_owned()))
@@ -118,6 +126,7 @@ impl KnowledgeStore {
             .bind(("limit", limit))
             .bind(("max_text_chars", max_text_chars))
             .bind(("exact_pattern", exact_pattern.to_owned()))
+            .bind(filter_bindings(filter)?)
             .await
             .context("execute lexical search")?
             .check()
@@ -546,6 +555,24 @@ fn validate_sections(doc: &ExtractedDocument) -> Result<()> {
     }
     ensure!(!seen.is_empty(), "document has no sections");
     Ok(())
+}
+
+fn filter_bindings(filter: &crate::retrieval::MetadataFilter) -> Result<Value> {
+    filter.validate()?;
+    let prefix = filter
+        .url_prefix
+        .as_ref()
+        .map(|p| Url::parse(p).map(|u| u.to_string()))
+        .transpose()?
+        .unwrap_or_default();
+    let subtree = if prefix.ends_with('/') {
+        prefix.clone()
+    } else {
+        format!("{prefix}/")
+    };
+    Ok(json!({"url_prefix":prefix,"url_subtree":subtree,
+        "url_query":format!("{prefix}?"),"heading":filter.heading.as_deref().unwrap_or_default().trim().to_lowercase(),
+        "crawled_after":filter.crawled_after}))
 }
 
 #[cfg(test)]

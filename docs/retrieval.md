@@ -119,9 +119,15 @@ failed replacement, schema upgrade with existing chunks, CLI restart, and the
 local crawl → extraction → chunks → restart → search path.
 
 Embeddings and vector retrieval are implemented separately; see `embeddings.md`.
-The next roadmap step connects ingestion orchestration and MCP search.
+Ingestion orchestration and MCP search are implemented; see `mcp.md`.
 
 Primary references: [analyzers](https://surrealdb.com/docs/reference/query-language/statements/define/analyzer),
 [search indexes](https://surrealdb.com/docs/learn/data-models/full-text-search/search-indexes),
 [scoring and common-term zero scores](https://surrealdb.com/docs/learn/data-models/full-text-search/scoring-and-ranking),
 [search functions](https://surrealdb.com/docs/reference/query-language/functions/database-functions/search).
+
+## Hybrid retrieval and context
+
+[Step 11](hybrid-retrieval.md) adds rank fusion, URL/heading/crawl-time filters,
+and context assembly. The existing lexical API remains available without an
+embedding provider.

@@ -183,6 +183,45 @@ async fn acceptance(real_model: bool) {
     assert_eq!(run["summary"]["document_count"], 3);
     assert_eq!(run["ingestion"]["embedding_coverage"]["ready"], 3);
 
+    let hybrid = command(&[
+        "hybrid-search",
+        "Proxy::all",
+        "--source",
+        "docs",
+        "--limit",
+        "1",
+    ])
+    .output()
+    .await
+    .unwrap();
+    assert!(
+        hybrid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hybrid.stderr)
+    );
+    let hybrid: Value = serde_json::from_slice(&hybrid.stdout).unwrap();
+    assert_eq!(hybrid[0]["match_kind"], "hybrid");
+    let context = command(&[
+        "retrieve",
+        "Proxy::all",
+        "--source",
+        "docs",
+        "--limit",
+        "1",
+        "--context-chars",
+        "1000",
+    ])
+    .output()
+    .await
+    .unwrap();
+    assert!(
+        context.status.success(),
+        "{}",
+        String::from_utf8_lossy(&context.stderr)
+    );
+    let context: Value = serde_json::from_slice(&context.stdout).unwrap();
+    assert_eq!(context["passages"].as_array().unwrap().len(), 1);
+    assert!(context["total_text_chars"].as_u64().unwrap() <= 1000);
     let transport = TokioChildProcess::new(command(&["mcp"])).unwrap();
     let client = ().serve(transport).await.unwrap();
     let tools = client.list_tools(None).await.unwrap();
@@ -198,6 +237,7 @@ async fn acceptance(real_model: bool) {
     assert_eq!(no_lexical.structured_content.unwrap()["hits"], json!([]));
     for (mode, query) in [
         ("lexical", "Proxy::all"),
+        ("hybrid", "Proxy::all"),
         (
             "vector",
             "How can I send HTTP traffic through an intermediary server?",
@@ -224,10 +264,36 @@ async fn acceptance(real_model: bool) {
         assert!(!hit["chunk_id"].as_str().unwrap().is_empty());
         assert_eq!(result.content.len(), 1); // JSON text compatibility for older clients.
     }
+    let expanded = client
+        .call_tool(
+            CallToolRequestParams::new("search").with_arguments(
+                json!({"query":"Proxy::all","mode":"hybrid","source_id":"docs",
+            "filter":{"url_prefix":fixture.root.join("docs/proxy").unwrap().as_str()},
+            "context":{"max_total_chars":1000}})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_ne!(expanded.is_error, Some(true));
+    let expanded = expanded.structured_content.unwrap();
+    assert_eq!(expanded["hits"][0]["match_kind"], "hybrid");
+    assert!(expanded["hits"][0]["fusion"]["lexical_rank"].is_number());
+    assert_eq!(expanded["context"]["passages"].as_array().unwrap().len(), 1);
+    assert!(expanded["context"]["total_text_chars"].as_u64().unwrap() <= 1000);
+    assert_eq!(
+        expanded["context"]["passages"][0]["chunks"][0]["content_kind"],
+        "source_data"
+    );
     for args in [
         json!({"query":"proxy","limit":51}),
         json!({"query":"proxy","sql":"SELECT *"}),
-        json!({"query":"proxy","mode":"hybrid"}),
+        json!({"query":"proxy","mode":"graph"}),
+        json!({"query":"proxy","context":{"neighbor_chunks":4}}),
+        json!({"query":"proxy","filter":{"url_prefix":"file:///etc/passwd"}}),
+        json!({"query":"proxy","filter":{"unknown":true}}),
     ] {
         assert!(
             client

@@ -1,7 +1,16 @@
 //! Source-backed knowledge search. Ranking, request validation and response
 //! policy stay here; database queries stay in storage.
+mod context;
+mod hybrid;
 use crate::storage::KnowledgeStore;
 use anyhow::{Result, ensure};
+pub use context::{
+    ContextChunk, ContextMatch, ContextOptions, ContextPassage, ContextResponse, assemble_context,
+};
+pub use hybrid::{
+    FusionEvidence, HybridRanker, RankedChunk, ReciprocalRankFusion, hybrid_search,
+    hybrid_search_with_ranker,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -21,6 +30,46 @@ pub enum SearchMode {
     Exact,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataFilter {
+    pub url_prefix: Option<String>,
+    pub heading: Option<String>,
+    /// Inclusive minimum content crawl time in Unix seconds (not last validation).
+    pub crawled_after: Option<u64>,
+}
+impl MetadataFilter {
+    pub fn validate(&self) -> Result<()> {
+        if let Some(prefix) = &self.url_prefix {
+            let url = Url::parse(prefix)?;
+            ensure!(
+                prefix.len() <= 4096
+                    && matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none(),
+                "URL prefix must be an HTTP(S) URL without credentials, query or fragment"
+            );
+        }
+        ensure!(
+            self.heading.as_ref().is_none_or(|h| !h.trim().is_empty()
+                && h.len() <= 1024
+                && !h.chars().any(char::is_control)),
+            "invalid heading filter"
+        );
+        ensure!(
+            self.crawled_after.is_none_or(|t| t <= i64::MAX as u64),
+            "invalid crawl timestamp filter"
+        );
+        Ok(())
+    }
+    pub(crate) fn is_empty(&self) -> bool {
+        self.url_prefix.is_none() && self.heading.is_none() && self.crawled_after.is_none()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
     pub query: String,
@@ -28,6 +77,7 @@ pub struct SearchQuery {
     pub limit: usize,
     pub max_text_chars: usize,
     pub mode: SearchMode,
+    pub filter: MetadataFilter,
 }
 impl SearchQuery {
     pub fn new(query: impl Into<String>) -> Self {
@@ -37,10 +87,12 @@ impl SearchQuery {
             limit: 8,
             max_text_chars: 4000,
             mode: SearchMode::Auto,
+            filter: MetadataFilter::default(),
         }
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.filter.validate()?;
         ensure!(
             !self.query.trim().is_empty()
                 && self.query.len() <= 1024
@@ -84,6 +136,7 @@ pub enum MatchKind {
     FullText,
     Exact,
     Vector,
+    Hybrid,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,12 +160,14 @@ pub struct KnowledgeHit {
     pub sequence: usize,
     pub block_start: usize,
     pub block_end: usize,
-    /// BM25 for lexical matches; cosine similarity for vector matches.
+    /// BM25 for lexical matches; cosine similarity for vector matches; RRF for hybrid.
     /// These scores are not probabilities and must not be combined directly.
     pub score: f64,
     pub match_kind: MatchKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_space: Option<crate::embeddings::EmbeddingSpace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fusion: Option<FusionEvidence>,
 }
 
 /// Query only one compatible vector space. Lexical retrieval remains usable
@@ -164,6 +219,7 @@ pub async fn search(store: &KnowledgeStore, query: SearchQuery) -> Result<Vec<Kn
             query.limit,
             query.max_text_chars,
             &pattern,
+            &query.filter,
         )
         .await?;
     let mut by_chunk: HashMap<String, KnowledgeHit> = HashMap::new();

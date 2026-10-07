@@ -118,7 +118,8 @@ partial indexing does not imply full source coverage. Check coverage separately.
 
 Unfiltered search uses model-scoped HNSW (`COSINE`, F64, EFC 150, M 12,
 query effort 100). It is approximate. Source-filtered search uses the source
-index and exact cosine scoring within that source. On pinned SurrealDB 3.3.0,
+index and exact cosine scoring within that source. Metadata filters also use
+exact scoring before the result limit; metadata-only searches can scan more vectors. On pinned SurrealDB 3.3.0,
 our crowded duplicate-vector fixture returned only two of three requested
 source hits with filtered HNSW; the exact path fills all three. This observation
 does not characterize every filtered HNSW query or future engine version.
@@ -127,7 +128,7 @@ Filtered scoring costs grow with the selected source's ready vector count.
 Results keep title, heading path, anchors, crawl timestamp, source/chunk IDs and
 hashes. Text is a bounded Unicode prefix, with explicit truncation. Ties are
 ordered by source, URL, sequence and chunk ID; approximate candidate membership
-can vary. MCP search is implemented; hybrid ranking remains a separate roadmap step.
+can vary. MCP search and [hybrid ranking](hybrid-retrieval.md) are implemented.
 [Incremental recrawling](recrawling.md) avoids regenerating unchanged derivatives.
 
 The deterministic suite covers model/dimension isolation, source filtering,

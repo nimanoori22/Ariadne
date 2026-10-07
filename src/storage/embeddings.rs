@@ -218,13 +218,17 @@ impl KnowledgeStore {
         vector: &[f64],
         query: &crate::retrieval::SearchQuery,
     ) -> Result<Vec<crate::retrieval::KnowledgeHit>> {
-        let (score, candidates) = if query.source_id.is_some() {
+        let (score, candidates) = if query.source_id.is_some() || !query.filter.is_empty() {
             // On the pinned engine, sparse filtered HNSW queries did not fill
             // all K slots in our duplicate-vector fixture. Exact scoring within
             // the indexed source partition preserves recall and filter scope.
             (
                 "vector::similarity::cosine(vector, $vector)",
-                "WITH INDEX by_source WHERE source_id = $source AND vector != NONE".to_owned(),
+                if query.source_id.is_some() {
+                    "WITH INDEX by_source WHERE source_id = $source AND vector != NONE".to_owned()
+                } else {
+                    "WHERE vector != NONE".to_owned()
+                },
             )
         } else {
             (
@@ -238,9 +242,10 @@ impl KnowledgeStore {
         // Identifiers are application-generated; only validated numeric bounds
         // enter the KNN syntax. Text, vectors and filters are bound parameters.
         let sql = format!(
-            "{}, {score} AS score FROM {} {candidates} AND data.status = 'ready' AND data.content_sha256 = chunk.data.content_sha256 ORDER BY score DESC, source_id ASC, document_url ASC, sequence ASC, chunk_id ASC LIMIT $limit TIMEOUT 10s;",
+            "{}, {score} AS score FROM {} {candidates} AND data.status = 'ready' AND data.content_sha256 = chunk.data.content_sha256 {} ORDER BY score DESC, source_id ASC, document_url ASC, sequence ASC, chunk_id ASC LIMIT $limit TIMEOUT 10s;",
             include_str!("vector_projection.surql"),
-            space.table()
+            space.table(),
+            include_str!("metadata_filter.surql").replace("data.", "chunk.data.")
         );
         let mut result = self
             .db
@@ -250,6 +255,7 @@ impl KnowledgeStore {
             .bind(("space", serde_json::to_value(space)?))
             .bind(("limit", query.limit))
             .bind(("max_text_chars", query.max_text_chars))
+            .bind(filter_bindings(&query.filter)?)
             .await?
             .check()?;
         let values: Vec<Value> = result.take(0)?;

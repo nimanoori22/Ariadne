@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ariadne::{
     crawler::{CrawlRequest, CrawlScope, crawl},
     embeddings::{OllamaConfig, OllamaProvider, index_source},
@@ -6,7 +6,10 @@ use ariadne::{
         IngestionStatus, extract_crawl, ingest, ingest_lexical, recrawl, recrawl_lexical,
         reprocess_lexical,
     },
-    retrieval::{SearchMode, SearchQuery, search, vector_search},
+    retrieval::{
+        ContextOptions, SearchMode, SearchQuery, assemble_context, hybrid_search, search,
+        vector_search,
+    },
     storage::{KnowledgeStore, Source},
 };
 use url::Url;
@@ -21,7 +24,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
         println!(
-            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  recrawl <source-id> <crawl-id> [--lexical-only] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  reprocess <source-id> <crawl-id> [--max-pages <n>] [--chunk-chars <n>]\n  source status <source-id>\n  document-status <source-id> <url>\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
+            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  recrawl <source-id> <crawl-id> [--lexical-only] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  reprocess <source-id> <crawl-id> [--max-pages <n>] [--chunk-chars <n>]\n  source status <source-id>\n  document-status <source-id> <url>\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  hybrid-search <query> [--source <id>] [--limit <n>]\n  retrieve <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>] [--neighbors <n>] [--context-chars <n>]\n  Search filters: --url-prefix <url> --heading <heading> --crawled-after <unix-seconds>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
         );
         return Ok(());
     }
@@ -108,6 +111,26 @@ async fn main() -> Result<()> {
         [] => println!("Ariadne database ready: {}", store.path().display()),
         ["search", query, options @ ..] => {
             print_json(&search(&store, search_query(query, options)?).await?)?
+        }
+        ["hybrid-search", query, options @ ..] => {
+            let request = search_query(query, options)?;
+            request.validate()?;
+            let provider = OllamaProvider::connect(OllamaConfig::from_env()?).await?;
+            print_json(&hybrid_search(&store, &provider, request).await?)?;
+        }
+        ["retrieve", query, options @ ..] => {
+            let (request, mode, context) = retrieval_options(query, options)?;
+            let hits = if mode == "lexical" {
+                search(&store, request).await?
+            } else {
+                let provider = OllamaProvider::connect(OllamaConfig::from_env()?).await?;
+                if mode == "hybrid" {
+                    hybrid_search(&store, &provider, request).await?
+                } else {
+                    vector_search(&store, &provider, request).await?
+                }
+            };
+            print_json(&assemble_context(&store, &hits, context).await?)?;
         }
         ["embed", source] => {
             store
@@ -214,6 +237,12 @@ fn search_query(query: &str, options: &[&str]) -> Result<SearchQuery> {
     }
     for pair in pairs {
         match pair {
+            ["--url-prefix", prefix] => request.filter.url_prefix = Some((*prefix).into()),
+            ["--heading", heading] => request.filter.heading = Some((*heading).into()),
+            ["--crawled-after", time] => {
+                request.filter.crawled_after =
+                    Some(time.parse().context("invalid crawl timestamp")?)
+            }
             ["--source", source] => request.source_id = Some((*source).to_owned()),
             ["--limit", limit] => request.limit = limit.parse().context("invalid search limit")?,
             ["--max-chars", budget] => {
@@ -226,4 +255,38 @@ fn search_query(query: &str, options: &[&str]) -> Result<SearchQuery> {
         }
     }
     Ok(request)
+}
+
+fn retrieval_options<'a>(
+    query: &str,
+    options: &'a [&str],
+) -> Result<(SearchQuery, &'a str, ContextOptions)> {
+    let mut context = ContextOptions::default();
+    let mut mode = "hybrid";
+    let mut search_options = Vec::new();
+    let (pairs, remainder) = options.as_chunks::<2>();
+    ensure!(
+        remainder.is_empty(),
+        "retrieve options require a flag and value"
+    );
+    for pair in pairs {
+        match pair {
+            ["--retrieval-mode", value] => {
+                ensure!(
+                    matches!(*value, "lexical" | "vector" | "hybrid"),
+                    "invalid retrieval mode"
+                );
+                mode = value;
+            }
+            ["--neighbors", value] => context.neighbor_chunks = value.parse()?,
+            ["--context-chars", value] => context.max_total_chars = value.parse()?,
+            ["--context-chunks", value] => context.max_chunks = value.parse()?,
+            ["--context-chunk-chars", value] => context.max_chunk_chars = value.parse()?,
+            _ => search_options.extend_from_slice(pair),
+        }
+    }
+    let request = search_query(query, &search_options)?;
+    request.validate()?;
+    context.validate()?;
+    Ok((request, mode, context))
 }

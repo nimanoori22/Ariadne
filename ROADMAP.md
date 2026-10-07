@@ -24,7 +24,9 @@ real local Ollama retrieval after restart and a bounded live documentation crawl
 See `docs/mcp.md`. Incremental recrawling is implemented with durable HTTP
 validators, hash/version-aware reuse, atomic replacement, conservative removal,
 offline reprocessing and CLI status; see `docs/recrawling.md`. The next work is
-step 11: hybrid ranking and context expansion.
+step 12: expanded agent access and operational reliability. Hybrid ranking,
+metadata filters, bounded context expansion, CLI and MCP integration are
+implemented; see `docs/hybrid-retrieval.md`.
 
 At the initial roadmap inspection, the repository contained a Rust 2024 package,
 an empty dependency list, and a `src/main.rs` that printed “Hello, world!”. This
@@ -227,6 +229,13 @@ single-page changes update only affected data. See `docs/recrawling.md`.
 updates only affected data, and incomplete discovery cannot delete good knowledge.
 
 ### 11. Add hybrid ranking, source filters, and context expansion
+
+**Implemented:** replaceable ranker using SurrealDB's built-in RRF, shared
+source/URL/heading/crawl-time filters before candidate limits, exact filtered
+vector recall, source-backed bounded neighboring context, overlap deduplication,
+stale-hit detection and CLI/MCP access. The deterministic four-query fixture
+improves mean recall@2 from 0.625 for either individual mode to 1.000 for hybrid;
+this validates fusion, not general real-model quality. See `docs/hybrid-retrieval.md`.
 
 - Combine lexical/vector candidates through a replaceable ranking implementation.
   Evaluate rank fusion before combining scores with incompatible scales.
