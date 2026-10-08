@@ -1,8 +1,7 @@
-use super::{ExtractionBatch, PreparedCrawl};
+use super::{ExtractionBatch, PreparedCrawl, prepare_document};
 use crate::{
     chunking::{
         CHUNKING_VERSION, ChunkPolicy, IndexMetadata, NORMALIZATION_VERSION, content_hashes,
-        index_document,
     },
     crawler::{CrawlReport, PageOutcome, PageState},
     extraction::{EXTRACTION_VERSION, ExtractedDocument, ExtractionOutcome, extract},
@@ -122,7 +121,11 @@ pub(crate) async fn prepare_incremental(
                 );
             }
         }
-        let can_reuse = !force && available && old.is_some_and(|i| compatible(i, policy));
+        let graph_compatible = snapshot
+            .as_ref()
+            .is_some_and(|s| s.graph_version.as_deref() == Some(crate::graph::GRAPH_VERSION));
+        let can_reuse =
+            !force && available && old.is_some_and(|i| compatible(i, policy)) && graph_compatible;
         if page.state == PageState::NotModified {
             if can_reuse {
                 plan.reused.push(ReusedDocument {
@@ -211,13 +214,13 @@ pub(crate) async fn prepare_incremental(
                 }
                 if snapshot.is_none() {
                     plan.added += 1;
-                } else if force || old.is_none_or(|i| !compatible(i, policy)) {
+                } else if force || !graph_compatible || old.is_none_or(|i| !compatible(i, policy)) {
                     plan.reprocessed += 1;
                 } else {
                     plan.changed += 1;
                 }
                 let (document, index) = tokio::task::spawn_blocking(move || {
-                    index_document(&document, policy).map(|index| (document, index))
+                    prepare_document(&document, policy).map(|index| (document, index))
                 })
                 .await??;
                 indexes.push(Some(index));

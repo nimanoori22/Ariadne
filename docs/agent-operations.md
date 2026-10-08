@@ -157,3 +157,7 @@ and proves admission returns before fetching finishes. Unit tests check public
 address/DNS policy, schema upgrade, interrupted jobs and closed-store backup
 restoration. Existing crawler fixtures cover redirect and scope boundaries.
 See [storage recovery guidance](storage.md#backup-and-restore).
+
+Document-link and entity reads are now available through `get_links` and
+`find_entity`; see [knowledge graph](knowledge-graph.md) for exact argument bounds,
+provenance, coverage and canonical URL semantics.

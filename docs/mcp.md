@@ -86,7 +86,7 @@ One application process owns the embedded database. Stop the MCP process before
 running CLI ingestion against the same directory, then restart it. Use a stable
 data directory outside `/tmp` for durable use.
 
-The server exposes nine knowledge tools. `search` retains this interface; document, source and supervised crawl operations are described in [agent operations](agent-operations.md):
+The server exposes eleven knowledge tools. `get_links` and `find_entity` are described in [knowledge graph](knowledge-graph.md). `search` retains this interface; document, source and supervised crawl operations are described in [agent operations](agent-operations.md):
 
 ```json
 {

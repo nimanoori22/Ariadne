@@ -19,8 +19,23 @@ use std::time::SystemTime;
 #[derive(Debug)]
 pub struct PreparedCrawl {
     pub(crate) batch: ExtractionBatch,
-    pub(crate) indexes: Vec<Option<DocumentIndex>>,
+    pub(crate) indexes: Vec<Option<PreparedDocument>>,
     pub(crate) recrawl: Option<RecrawlPlan>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedDocument {
+    pub index: DocumentIndex,
+    pub graph: crate::graph::DocumentGraph,
+}
+
+fn prepare_document(
+    document: &crate::extraction::ExtractedDocument,
+    policy: ChunkPolicy,
+) -> anyhow::Result<PreparedDocument> {
+    let index = index_document(document, policy)?;
+    let graph = crate::graph::derive(document, &index.chunks)?;
+    Ok(PreparedDocument { index, graph })
 }
 
 pub fn prepare_crawl(batch: ExtractionBatch, policy: ChunkPolicy) -> anyhow::Result<PreparedCrawl> {
@@ -28,7 +43,7 @@ pub fn prepare_crawl(batch: ExtractionBatch, policy: ChunkPolicy) -> anyhow::Res
         .outcomes
         .iter()
         .map(|outcome| match outcome {
-            ExtractionOutcome::Extracted(document) => index_document(document, policy).map(Some),
+            ExtractionOutcome::Extracted(document) => prepare_document(document, policy).map(Some),
             ExtractionOutcome::Rejected { .. } => Ok(None),
         })
         .collect::<anyhow::Result<Vec<_>>>()?;

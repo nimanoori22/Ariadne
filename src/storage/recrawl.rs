@@ -50,6 +50,8 @@ pub(crate) struct RecrawlSnapshot {
     pub indexing: Option<IndexMetadata>,
     #[serde(default)]
     pub revalidation: Option<Value>,
+    #[serde(default)]
+    pub graph_version: Option<String>,
 }
 
 impl KnowledgeStore {
@@ -81,7 +83,7 @@ impl KnowledgeStore {
         source: &str,
         url: &Url,
     ) -> Result<Option<RecrawlSnapshot>> {
-        let mut result = self.db.query("SELECT data.indexing AS indexing, data.revalidation AS revalidation FROM type::record('document', [$source, $url]);")
+        let mut result = self.db.query("SELECT data.indexing AS indexing, data.revalidation AS revalidation, data.graph.version AS graph_version FROM type::record('document', [$source, $url]);")
             .bind(("source", source.to_owned())).bind(("url", url.to_string())).await?.check()?;
         let rows: Vec<Value> = result.take(0)?;
         rows.into_iter()

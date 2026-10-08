@@ -1,5 +1,6 @@
 //! Embedded SurrealDB and the sole SurrealQL boundary.
 mod embeddings;
+mod graph;
 mod jobs;
 mod knowledge;
 mod recrawl;
@@ -323,7 +324,10 @@ impl KnowledgeStore {
             );
             match outcome {
                 ExtractionOutcome::Extracted(doc) => {
-                    let index = index.context("successful document missing its prepared index")?;
+                    let prepared =
+                        index.context("successful document missing its prepared index")?;
+                    let index = prepared.index;
+                    let graph = prepared.graph;
                     validate_sections(&doc)?;
                     extracted_count += 1;
                     pages.push(json!({"page": doc.page, "extraction": "extracted"}));
@@ -334,7 +338,7 @@ impl KnowledgeStore {
                         .remove("sections")
                         .context("document sections missing")?;
                     data["indexing"] = serde_json::to_value(&index.metadata)?;
-                    let document = json!({"url": doc.canonical_url, "data": data, "sections": sections, "chunks": index.chunks});
+                    let document = json!({"url": doc.canonical_url, "data": data, "sections": sections, "chunks": index.chunks, "graph": graph});
                     if let Some(&index) = identities.get(doc.canonical_url.as_str()) {
                         // Identical redirect aliases share one current document,
                         // while both original fetches remain in the audit.
@@ -437,7 +441,8 @@ impl KnowledgeStore {
         }
         let summary = json!({"started_at": batch.started_at, "finished_at": batch.finished_at, "page_count": pages.len(), "document_count": documents.len() + reused.len(), "chunk_count": chunk_count, "oversized_chunk_count": oversized_chunk_count, "alias_count": extracted_count - documents.len(), "rejected_count": rejected_count, "removed_count":removed.len(),"incremental":incremental,"blocked": batch.blocked, "dropped_pages": batch.dropped_pages, "audit_overflow": batch.audit_overflow, "delivery_complete": batch.dropped_pages == 0 && !batch.audit_overflow,"discovery":batch.discovery,"crawl_elapsed_ms":batch.finished_at.duration_since(batch.started_at).unwrap_or_default().as_millis(),"retained_body_bytes":pages.iter().filter_map(|p|p["page"]["raw_body"].as_array().map(Vec::len)).sum::<usize>()});
         self.transaction(
-            include_str!("finish_crawl.surql"),
+            &include_str!("finish_crawl.surql")
+                .replace("-- GRAPH_REPLACE", include_str!("replace_graph.surql")),
             json!({
                 "source_id":batch.source_id,"crawl_id":batch.crawl_id,
                 "pages":pages,"documents":documents,"reused":reused,"removed":removed,
@@ -792,7 +797,7 @@ mod tests {
                 status: 200,
                 headers: vec![],
                 raw_body: format!(
-                    "<title>{title}</title><main><h1>{title}</h1><p>content</p></main>"
+                    "<title>{title}</title><main><h1>{title}</h1><p><code>{title}::new</code></p><a href='target#one'>Next</a></main>"
                 )
                 .into_bytes(),
                 content_truncated: false,
@@ -821,18 +826,45 @@ mod tests {
         let original_chunks = store.get_chunks("docs", &url).await.unwrap();
         let original_indexing = store.get_indexing("docs", &url).await.unwrap();
         let original_search = search(&store, SearchQuery::new("Original")).await.unwrap();
+        let original_links = store.document_links("docs", &url, false, 20).await.unwrap();
+        let original_mentions = store
+            .entity_mentions("docs", "Original::new", 20)
+            .await
+            .unwrap();
+        assert_eq!(original_links["links"].as_array().unwrap().len(), 1);
+        assert_eq!(original_mentions["mentions"].as_array().unwrap().len(), 1);
         assert!(!original_search.is_empty());
-        // Force a storage error after audits have been inserted and old sections
-        // deleted, exercising a real database rollback rather than prevalidation.
+        // Fail inside graph replacement after new links and entities are written,
+        // exercising database rollback across audit, retrieval and graph data.
         store
             .db
-            .query("DEFINE FIELD data.title ON document TYPE string ASSERT $value != 'Rejected';")
+            .query("DEFINE FIELD data.symbol ON mentions TYPE string ASSERT $value != 'Rejected::new';")
             .await
             .unwrap()
             .check()
             .unwrap();
         store.begin_crawl(&request("bad")).await.unwrap();
         assert!(store.finish_crawl(batch("bad", "Rejected")).await.is_err());
+        assert_eq!(
+            store.document_links("docs", &url, false, 20).await.unwrap(),
+            original_links
+        );
+        assert_eq!(
+            store
+                .entity_mentions("docs", "Original::new", 20)
+                .await
+                .unwrap(),
+            original_mentions
+        );
+        assert!(
+            store
+                .entity_mentions("docs", "Rejected::new", 20)
+                .await
+                .unwrap()["mentions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             serde_json::to_value(store.get_document("docs", &url).await.unwrap()).unwrap(),
             original

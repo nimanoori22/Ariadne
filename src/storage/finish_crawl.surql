@@ -31,6 +31,7 @@ FOR $doc IN $documents {
                 section = type::record('section', [$source_id, $doc.url, $chunk.section_id]),
                 sequence = $chunk.sequence, data = $chunk;
     };
+    -- GRAPH_REPLACE
 };
 FOR $reuse IN $reused {
     LET $document = type::record('document', [$source_id, $reuse.url]);
@@ -45,7 +46,8 @@ FOR $reuse IN $reused {
         LET $names = array::map($fresh, |$h| $h[0]);
         array::concat(array::filter($base, |$h| $h[0] NOT IN $names), $fresh)
     } ELSE { $reuse.page.headers };
-    IF $reuse.refreshed != NULL { UPDATE $document SET data = $reuse.refreshed; }
+    LET $graph = $document.data.graph;
+    IF $reuse.refreshed != NULL { UPDATE $document SET data = $reuse.refreshed, data.graph = $graph; }
     ELSE IF $reuse.kind != 'not_modified' { UPDATE $document SET data.page = $reuse.page; };
     UPDATE $document SET data.indexing = $reuse.indexing,
         data.revalidation = {availability: 'active', last_checked_at: $finished,
@@ -58,11 +60,14 @@ FOR $removed IN $removed {
         UPDATE type::table($table) SET data.status = 'stale', vector = NONE, data.updated_at = $finished WHERE document = $document;
     };
     DELETE chunk WHERE document = $document;
+    DELETE links_to WHERE in = $document;
+    DELETE mentions WHERE document = $document;
     -- Keep raw/structured content for inspection and future reprocessing, but
     -- remove retrieval units only after a directly observed 404/410.
     UPDATE $document SET data.revalidation = {availability: 'removed',
         last_checked_at: $finished, last_checked_crawl_id: $crawl_id,
         status: $removed.page.status, headers: []};
+    UPDATE $document SET data.graph = NONE;
 };
 UPDATE $run SET status = 'completed', data.status = 'completed',
     data.finished_at = $finished, data.summary = $summary;

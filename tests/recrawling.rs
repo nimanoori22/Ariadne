@@ -74,7 +74,7 @@ impl Site {
             (
                 "/docs/b".into(),
                 Route::html(
-                    "<title>Beta</title><main><h1>Beta</h1><p>BetaOriginal explains storage.</p></main>",
+                    "<title>Beta</title><main><h1>Beta</h1><p>BetaOriginal explains storage using <code>Store::open</code>.</p><a href='a'>Alpha</a></main>",
                 ),
             ),
         ])));
@@ -241,6 +241,14 @@ async fn conditional_recrawl_after_restart_preserves_chunks_and_generates_no_emb
     let site = Site::start().await;
     let (dir, store, provider) = setup(&site).await;
     let chunks = store.get_chunks("docs", &site.url("a")).await.unwrap();
+    let links = store
+        .document_links("docs", &site.root, false, 100)
+        .await
+        .unwrap();
+    let mentions = store
+        .entity_mentions("docs", "Client::alpha", 100)
+        .await
+        .unwrap();
     drop(store);
     tokio::time::sleep(Duration::from_millis(100)).await;
     let store = KnowledgeStore::open(dir.path().join("knowledge"))
@@ -267,6 +275,20 @@ async fn conditional_recrawl_after_restart_preserves_chunks_and_generates_no_emb
     assert_eq!(report.generated, 0);
     assert_eq!(report.reused, 3);
     assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(
+        store
+            .document_links("docs", &site.root, false, 100)
+            .await
+            .unwrap(),
+        links
+    );
+    assert_eq!(
+        store
+            .entity_mentions("docs", "Client::alpha", 100)
+            .await
+            .unwrap(),
+        mentions
+    );
     assert_eq!(
         store.get_chunks("docs", &site.url("a")).await.unwrap(),
         chunks
@@ -370,6 +392,10 @@ async fn identical_bytes_and_boilerplate_changes_skip_derived_processing_without
     }
     let (_dir, store, provider) = setup(&site).await;
     let chunks = store.get_chunks("docs", &site.url("a")).await.unwrap();
+    let mentions = store
+        .entity_mentions("docs", "Client::alpha", 100)
+        .await
+        .unwrap();
     site.change("/docs/a", |r| {
         r.body = format!("<nav>Changed boilerplate</nav>{}", r.body)
     });
@@ -384,6 +410,20 @@ async fn identical_bytes_and_boilerplate_changes_skip_derived_processing_without
     .await
     .unwrap();
     assert_eq!(run.summary.unwrap()["incremental"]["unchanged"], 3);
+    assert_eq!(
+        store
+            .entity_mentions("docs", "Client::alpha", 100)
+            .await
+            .unwrap(),
+        mentions
+    );
+    assert_eq!(
+        store
+            .document_links("docs", &site.url("a"), false, 20)
+            .await
+            .unwrap()["document"]["graph"]["version"],
+        ariadne::graph::GRAPH_VERSION
+    );
     assert_eq!(
         run.ingestion.unwrap().embedding_report.unwrap().generated,
         0
@@ -472,6 +512,16 @@ async fn last_modified_alone_and_304_validator_rotation_are_persisted() {
 async fn gone_pages_leave_search_but_keep_raw_content_and_can_be_restored() {
     let site = Site::start().await;
     let (_dir, store, provider) = setup(&site).await;
+    assert_eq!(
+        store
+            .entity_mentions("docs", "Store::open", 20)
+            .await
+            .unwrap()["mentions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     site.change("/docs/b", |r| r.status = 410);
     site.change("/docs/a", |r| r.status = 503);
     let run = recrawl_lexical(
@@ -486,6 +536,53 @@ async fn gone_pages_leave_search_but_keep_raw_content_and_can_be_restored() {
     let summary = run.summary.unwrap();
     assert_eq!(summary["removed_count"], 1);
     assert_eq!(summary["rejected_count"], 1);
+    assert!(
+        store
+            .entity_mentions("docs", "Store::open", 20)
+            .await
+            .unwrap()["mentions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .entity_mentions("docs", "Client::alpha", 20)
+            .await
+            .unwrap()["mentions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let links = store
+        .document_links("docs", &site.root, false, 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        links["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["target_url"] == site.url("b").as_str())
+            .unwrap()["target_availability"],
+        "removed"
+    );
+    assert!(
+        store
+            .document_links("docs", &site.url("b"), true, 20)
+            .await
+            .unwrap()["links"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let incoming = store
+        .document_links("docs", &site.url("a"), true, 20)
+        .await
+        .unwrap();
+    assert_eq!(incoming["links"].as_array().unwrap().len(), 1);
+    assert_eq!(incoming["links"][0]["document_url"], site.root.as_str());
     assert!(
         search(&store, SearchQuery::new("BetaOriginal"))
             .await
@@ -538,6 +635,16 @@ async fn gone_pages_leave_search_but_keep_raw_content_and_can_be_restored() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        store
+            .entity_mentions("docs", "Store::open", 20)
+            .await
+            .unwrap()["mentions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         run.ingestion.unwrap().embedding_report.unwrap().generated,
         1

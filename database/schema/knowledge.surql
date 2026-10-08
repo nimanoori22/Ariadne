@@ -40,3 +40,18 @@ DEFINE FIELD source ON crawl_job TYPE record<source>;
 DEFINE FIELD status ON crawl_job TYPE string ASSERT $value IN ['queued', 'running', 'completed', 'partial', 'failed', 'cancelled', 'interrupted'];
 DEFINE FIELD data ON crawl_job TYPE object FLEXIBLE;
 DEFINE INDEX jobs_by_source ON crawl_job FIELDS source;
+
+-- Unindexed link targets remain explicit; reads only traverse indexed documents
+-- in the same source. No automatic fetch follows these edges.
+DEFINE TABLE links_to TYPE RELATION IN document OUT document SCHEMAFULL;
+DEFINE FIELD data ON links_to TYPE object FLEXIBLE;
+DEFINE INDEX links_from ON links_to FIELDS in;
+DEFINE INDEX links_into ON links_to FIELDS out;
+DEFINE TABLE entity SCHEMAFULL;
+DEFINE FIELD symbol ON entity TYPE string;
+DEFINE FIELD kind ON entity TYPE string;
+DEFINE TABLE mentions TYPE RELATION IN chunk OUT entity SCHEMAFULL;
+DEFINE FIELD document ON mentions TYPE record<document>;
+DEFINE FIELD data ON mentions TYPE object FLEXIBLE;
+DEFINE INDEX mentions_by_document ON mentions FIELDS document;
+DEFINE INDEX mentions_by_entity ON mentions FIELDS out;

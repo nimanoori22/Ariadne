@@ -27,8 +27,11 @@ offline reprocessing and CLI status; see `docs/recrawling.md`. Step 12 adds
 expanded agent access and operational reliability; see `docs/agent-operations.md`.
 The two-source MCP acceptance gate passes. Opt-in Spider/Chromium browser
 fallback for documentation whose static HTML lacks useful content is implemented;
-see `docs/browser-fallback.md`. The next work is useful document-link graph
-traversal and deterministic entity extraction. Hybrid ranking,
+see `docs/browser-fallback.md`. Source-scoped document-link traversal and
+deterministic qualified Rust-style entity extraction are implemented with CLI/MCP
+reads, atomic recrawl updates and observable graph coverage; see
+`docs/knowledge-graph.md`. The next work is graph-assisted retrieval evaluated
+against the query relevance set. Hybrid ranking,
 metadata filters, bounded context expansion, CLI and MCP integration are
 implemented; see `docs/hybrid-retrieval.md`.
 
@@ -276,7 +279,7 @@ searched through MCP with filters, hybrid ranking, context, and inspectable stat
 ## Later work, driven by demonstrated retrieval needs
 
 1. Browser fallback through Spider for sources whose static responses lack content. **Implemented.**
-2. Useful document-link graph traversal and deterministic entity extraction.
+2. Useful document-link graph traversal and deterministic entity extraction. **Implemented:** canonical-URL one-hop links, explicit unresolved/removed targets, exact code/heading entity evidence, source filtering, CLI/MCP reads, atomic recrawl updates and version-aware backfill. See `docs/knowledge-graph.md`.
 3. Graph-assisted retrieval, measured against the query relevance set.
 4. Document version history and version-aware retrieval.
 5. Reranking, optional LLM-assisted extraction, and task-directed crawling.
