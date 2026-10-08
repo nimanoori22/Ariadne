@@ -53,6 +53,8 @@ pub struct ContextMatch {
     pub score: f64,
     pub match_kind: MatchKind,
     pub fusion: Option<FusionEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<super::GraphEvidence>,
     pub text_omitted: bool,
 }
 #[derive(Debug, Serialize, Deserialize)]
@@ -222,6 +224,7 @@ pub async fn assemble_context(
                 score: h.score,
                 match_kind: h.match_kind,
                 fusion: h.fusion.clone(),
+                graph: h.graph.clone(),
                 text_omitted: !included.contains(&h.chunk_id),
             })
             .collect();

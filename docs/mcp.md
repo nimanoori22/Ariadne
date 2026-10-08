@@ -165,3 +165,8 @@ After reopening, `search 'Proxy::all' --source reqwest --limit 1` returned the
 `all` example at `struct.Proxy.html#example-2`. Its scratch database was
 `/tmp/ariadne-step9-live`; the earlier sandbox-blocked network attempt remained
 audited as partial, and the permitted crawl used a new run ID.
+
+Optional `graph` arguments on `search` add bounded one-hop document-link and
+shared-entity candidates with source-local path evidence. Lexical graph search
+works without Ollama. See [graph retrieval](graph-retrieval.md) for argument
+bounds, diagnostics, score semantics and evaluation.

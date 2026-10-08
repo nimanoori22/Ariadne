@@ -1,6 +1,7 @@
 //! Embedded SurrealDB and the sole SurrealQL boundary.
 mod embeddings;
 mod graph;
+mod graph_retrieval;
 mod jobs;
 mod knowledge;
 mod recrawl;

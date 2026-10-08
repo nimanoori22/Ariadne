@@ -1,11 +1,16 @@
 //! Source-backed knowledge search. Ranking, request validation and response
 //! policy stay here; database queries stay in storage.
 mod context;
+pub(crate) mod graph;
 mod hybrid;
 use crate::storage::KnowledgeStore;
 use anyhow::{Result, ensure};
 pub use context::{
     ContextChunk, ContextMatch, ContextOptions, ContextPassage, ContextResponse, assemble_context,
+};
+pub use graph::{
+    GraphEvidence, GraphOptions, GraphPath, GraphRelation, GraphReport, GraphSearchResponse,
+    graph_hybrid_search, graph_search, graph_vector_search,
 };
 pub use hybrid::{
     FusionEvidence, HybridRanker, RankedChunk, ReciprocalRankFusion, hybrid_search,
@@ -137,6 +142,7 @@ pub enum MatchKind {
     Exact,
     Vector,
     Hybrid,
+    Graph,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -168,6 +174,8 @@ pub struct KnowledgeHit {
     pub embedding_space: Option<crate::embeddings::EmbeddingSpace>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fusion: Option<FusionEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<GraphEvidence>,
 }
 
 /// Query only one compatible vector space. Lexical retrieval remains usable

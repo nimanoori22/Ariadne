@@ -8,8 +8,8 @@ use ariadne::{
     extraction::extract,
     ingestion::{ExtractionBatch, prepare_crawl},
     retrieval::{
-        ContentKind, ContextOptions, MatchKind, MetadataFilter, SearchQuery, assemble_context,
-        hybrid_search, search, vector_search,
+        ContentKind, ContextOptions, GraphOptions, MatchKind, MetadataFilter, SearchQuery,
+        assemble_context, graph_hybrid_search, hybrid_search, search, vector_search,
     },
     storage::{KnowledgeStore, Source},
 };
@@ -212,7 +212,7 @@ async fn relevance_fixture_measures_complementary_search_at_two_results() {
         ),
         ("DEFINE INDEX", vec!["/surreal/indexes"], "surreal"),
     ];
-    let mut totals = [0.; 3];
+    let mut totals = [0.; 4];
     for (query, relevant, source) in cases.iter() {
         let mut request = SearchQuery::new(*query);
         request.limit = 2;
@@ -222,7 +222,13 @@ async fn relevance_fixture_measures_complementary_search_at_two_results() {
             vector_search(&store, &provider, request.clone())
                 .await
                 .unwrap(),
-            hybrid_search(&store, &provider, request).await.unwrap(),
+            hybrid_search(&store, &provider, request.clone())
+                .await
+                .unwrap(),
+            graph_hybrid_search(&store, &provider, request, GraphOptions::default())
+                .await
+                .unwrap()
+                .hits,
         ];
         for (i, hits) in lists.iter().enumerate() {
             totals[i] += relevant
@@ -234,11 +240,12 @@ async fn relevance_fixture_measures_complementary_search_at_two_results() {
     }
     let scores = totals.map(|v| v / cases.len() as f64);
     println!(
-        "fixture recall@2: lexical={} vector={} hybrid={}",
-        scores[0], scores[1], scores[2]
+        "fixture recall@2: lexical={} vector={} hybrid={} graph={}",
+        scores[0], scores[1], scores[2], scores[3]
     );
     assert!(scores[2] > scores[0] && scores[2] > scores[1], "{scores:?}");
     assert_eq!(scores[2], 1.);
+    assert_eq!(scores[3], scores[2]);
 }
 
 #[tokio::test]

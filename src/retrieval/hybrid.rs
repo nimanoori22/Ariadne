@@ -11,6 +11,8 @@ pub struct FusionEvidence {
     pub vector_rank: Option<usize>,
     pub lexical_score: Option<f64>,
     pub vector_score: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_rank: Option<usize>,
 }
 #[derive(Debug, Deserialize)]
 pub struct RankedChunk {
@@ -73,8 +75,19 @@ pub async fn hybrid_search_with_ranker<P: EmbeddingProvider, R: HybridRanker>(
         search(store, candidates),
         vector_search(store, provider, semantic)
     )?;
+    fuse_candidates(store, &lexical, &vector, &[], query.limit, ranker).await
+}
+
+pub(crate) async fn fuse_candidates<R: HybridRanker>(
+    store: &KnowledgeStore,
+    lexical: &[KnowledgeHit],
+    vector: &[KnowledgeHit],
+    graph: &[KnowledgeHit],
+    limit: usize,
+    ranker: &R,
+) -> Result<Vec<KnowledgeHit>> {
     let mut by_id: HashMap<String, KnowledgeHit> = HashMap::new();
-    for (is_vector, hits) in [(false, &lexical), (true, &vector)] {
+    for (component, hits) in [(0, lexical), (1, vector), (2, graph)] {
         for (index, hit) in hits.iter().enumerate() {
             if let Some(saved) = by_id.get(&hit.chunk_id) {
                 // Concurrent replacement must not fuse inconsistent versions.
@@ -93,11 +106,15 @@ pub async fn hybrid_search_with_ranker<P: EmbeddingProvider, R: HybridRanker>(
                     vector_rank: None,
                     lexical_score: None,
                     vector_score: None,
+                    graph_rank: None,
                 });
                 value
             });
             let evidence = saved.fusion.as_mut().unwrap();
-            if is_vector {
+            if component == 2 {
+                evidence.graph_rank = Some(index + 1);
+                saved.graph = hit.graph.clone();
+            } else if component == 1 {
                 evidence.vector_rank = Some(index + 1);
                 evidence.vector_score = Some(hit.score);
                 saved.embedding_space = hit.embedding_space.clone();
@@ -110,10 +127,13 @@ pub async fn hybrid_search_with_ranker<P: EmbeddingProvider, R: HybridRanker>(
     if by_id.is_empty() {
         return Ok(vec![]);
     }
-    let lists = [
+    let mut lists = vec![
         lexical.iter().map(|h| h.chunk_id.clone()).collect(),
         vector.iter().map(|h| h.chunk_id.clone()).collect(),
     ];
+    if !graph.is_empty() {
+        lists.push(graph.iter().map(|h| h.chunk_id.clone()).collect());
+    }
     let ranked = ranker.rank(store, &lists).await?;
     let mut hits = Vec::new();
     for rank in ranked {
@@ -122,7 +142,11 @@ pub async fn hybrid_search_with_ranker<P: EmbeddingProvider, R: HybridRanker>(
             .remove(&rank.id)
             .ok_or_else(|| anyhow::anyhow!("ranker returned unknown or repeated candidate"))?;
         hit.score = rank.rrf_score;
-        hit.match_kind = MatchKind::Hybrid;
+        hit.match_kind = if graph.is_empty() {
+            MatchKind::Hybrid
+        } else {
+            MatchKind::Graph
+        };
         hits.push(hit);
     }
     // Request the full bounded union from the engine so arbitrary ties at its
@@ -135,6 +159,6 @@ pub async fn hybrid_search_with_ranker<P: EmbeddingProvider, R: HybridRanker>(
             .then_with(|| a.sequence.cmp(&b.sequence))
             .then_with(|| a.chunk_id.cmp(&b.chunk_id))
     });
-    hits.truncate(query.limit);
+    hits.truncate(limit);
     Ok(hits)
 }

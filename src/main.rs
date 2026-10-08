@@ -7,7 +7,8 @@ use ariadne::{
         reprocess_lexical,
     },
     retrieval::{
-        ContextOptions, SearchMode, SearchQuery, assemble_context, hybrid_search, search,
+        ContextOptions, GraphOptions, SearchMode, SearchQuery, assemble_context,
+        graph_hybrid_search, graph_search, graph_vector_search, hybrid_search, search,
         vector_search,
     },
     storage::{KnowledgeStore, Source},
@@ -24,7 +25,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
         println!(
-            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  recrawl <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  reprocess <source-id> <crawl-id> [--max-pages <n>] [--chunk-chars <n>]\n  source status <source-id>\n  document-status <source-id> <url>\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  links <source-id> <url> incoming|outgoing\n  entity <source-id> <qualified-path>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  hybrid-search <query> [--source <id>] [--limit <n>]\n  retrieve <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>] [--neighbors <n>] [--context-chars <n>]\n  Search filters: --url-prefix <url> --heading <heading> --crawled-after <unix-seconds>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
+            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  recrawl <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  reprocess <source-id> <crawl-id> [--max-pages <n>] [--chunk-chars <n>]\n  source status <source-id>\n  document-status <source-id> <url>\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  links <source-id> <url> incoming|outgoing\n  entity <source-id> <qualified-path>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  hybrid-search <query> [--source <id>] [--limit <n>]\n  graph-search <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>]\n  retrieve <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>] [--neighbors <n>] [--context-chars <n>]\n  Graph options: --graph (on retrieve), --graph-seeds <1..8>, --graph-edges <1..8>, --graph-chunks <1..3>, --graph-candidates <1..50>, --graph-links true|false, --graph-entities true|false\n  Search filters: --url-prefix <url> --heading <heading> --crawled-after <unix-seconds>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
         );
         return Ok(());
     }
@@ -134,19 +135,47 @@ async fn main() -> Result<()> {
             let provider = OllamaProvider::connect(OllamaConfig::from_env()?).await?;
             print_json(&hybrid_search(&store, &provider, request).await?)?;
         }
-        ["retrieve", query, options @ ..] => {
-            let (request, mode, context) = retrieval_options(query, options)?;
+        [
+            operation @ ("retrieve" | "graph-search"),
+            query,
+            options @ ..,
+        ] => {
+            let (remaining, graph) = graph_options(options, *operation == "graph-search")?;
+            let (request, mode, context) = retrieval_options(query, &remaining)?;
+            let mut graph_report = None;
             let hits = if mode == "lexical" {
-                search(&store, request).await?
+                if let Some(graph) = graph {
+                    let response = graph_search(&store, request, graph).await?;
+                    graph_report = Some(response.graph);
+                    response.hits
+                } else {
+                    search(&store, request).await?
+                }
             } else {
                 let provider = OllamaProvider::connect(OllamaConfig::from_env()?).await?;
-                if mode == "hybrid" {
+                if let Some(graph) = graph {
+                    let response = if mode == "hybrid" {
+                        graph_hybrid_search(&store, &provider, request, graph).await?
+                    } else {
+                        graph_vector_search(&store, &provider, request, graph).await?
+                    };
+                    graph_report = Some(response.graph);
+                    response.hits
+                } else if mode == "hybrid" {
                     hybrid_search(&store, &provider, request).await?
                 } else {
                     vector_search(&store, &provider, request).await?
                 }
             };
-            print_json(&assemble_context(&store, &hits, context).await?)?;
+            let mut result = if *operation == "graph-search" {
+                serde_json::json!({"hits":hits})
+            } else {
+                serde_json::to_value(assemble_context(&store, &hits, context).await?)?
+            };
+            if let Some(report) = graph_report {
+                result["graph"] = serde_json::to_value(report)?;
+            }
+            print_json(&result)?;
         }
         ["embed", source] => {
             store
@@ -319,4 +348,44 @@ fn retrieval_options<'a>(
     request.validate()?;
     context.validate()?;
     Ok((request, mode, context))
+}
+
+fn graph_options<'a>(
+    options: &'a [&'a str],
+    mut enabled: bool,
+) -> Result<(Vec<&'a str>, Option<GraphOptions>)> {
+    let mut graph = GraphOptions::default();
+    let mut remaining = Vec::new();
+    let mut cursor = 0;
+    while cursor < options.len() {
+        let flag = options[cursor];
+        if flag == "--graph" {
+            enabled = true;
+            cursor += 1;
+            continue;
+        }
+        if flag.starts_with("--graph-") {
+            let value = options
+                .get(cursor + 1)
+                .context("graph option requires a value")?;
+            enabled = true;
+            match flag {
+                "--graph-seeds" => graph.max_seeds = value.parse()?,
+                "--graph-edges" => graph.max_edges_per_seed = value.parse()?,
+                "--graph-chunks" => graph.max_chunks_per_edge = value.parse()?,
+                "--graph-candidates" => graph.max_candidates = value.parse()?,
+                "--graph-links" => graph.links = value.parse()?,
+                "--graph-entities" => graph.entities = value.parse()?,
+                _ => bail!("unknown graph option; use --help"),
+            }
+            cursor += 2;
+        } else {
+            remaining.push(flag);
+            cursor += 1;
+        }
+    }
+    if enabled {
+        graph.validate()?;
+    }
+    Ok((remaining, enabled.then_some(graph)))
 }

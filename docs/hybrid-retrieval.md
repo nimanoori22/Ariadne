@@ -144,3 +144,11 @@ Tests cover built-in fusion, stable ties, component evidence, replaceable
 ranking, filtered recall, invalid filters, overlapping context, code and heading
 preservation, global Unicode budgets, stale-hit detection, CLI retrieval and
 MCP hybrid/context behavior after restart.
+
+## Optional graph assistance
+
+The existing query relevance set now also verifies graph-assisted hybrid search
+retains mean recall@2 of 1.000. Optional one-hop link/entity candidates, their
+rank-fusion evidence, bounds and separate relation evaluation are documented in
+[graph retrieval](graph-retrieval.md). MCP enables this through a `graph` object
+on `search`; CLI supports `graph-search` and `retrieve --graph`.

@@ -2,7 +2,8 @@
 
 Ariadne now persists a small, source-backed knowledge graph alongside documents,
 sections and chunks. These operations work without Ollama or network access.
-Graph-assisted search ranking remains the next roadmap item.
+Opt-in graph-assisted search ranking is implemented; see
+[graph retrieval](graph-retrieval.md) for usage, evidence and evaluation.
 
 ## CLI and MCP
 
