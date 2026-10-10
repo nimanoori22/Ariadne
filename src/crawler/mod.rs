@@ -104,6 +104,9 @@ pub struct CrawlRequest {
     pub discovery: bool,
     #[serde(default)]
     pub browser_fallback: bool,
+    /// A bounded fetch batch; discovered links are returned for durable scheduling.
+    #[serde(default)]
+    pub selected_urls: Vec<Url>,
 }
 
 impl CrawlRequest {
@@ -131,6 +134,7 @@ impl CrawlRequest {
             public_network_only: false,
             discovery: false,
             browser_fallback: false,
+            selected_urls: vec![],
         }
     }
 
@@ -154,6 +158,13 @@ impl CrawlRequest {
             return Err(CrawlError(
                 "invalid crawl identity, scope, or resource limits".into(),
             ));
+        }
+        if !self.selected_urls.is_empty()
+            && (self.selected_urls.len() > self.max_pages as usize
+                || self.selected_urls.iter().any(|u| !self.scope.contains(u))
+                || self.browser_fallback)
+        {
+            return Err(CrawlError("invalid selected URL batch".into()));
         }
         if self.public_network_only {
             network::validate_public_url(&self.seed)
@@ -230,6 +241,8 @@ pub struct CrawlReport {
     pub audit_overflow: bool,
     #[serde(default)]
     pub discovery: DiscoveryReport,
+    #[serde(default)]
+    pub discovered_urls: Vec<String>,
 }
 
 impl CrawlReport {
@@ -275,7 +288,13 @@ async fn crawl_inner(
     website.with_whitelist_url(Some(vec![
         format!("^{origin}{prefix}(?:/[^%?#]*(?:\\?[^#]*)?|\\?[^#]*|$)$").into(),
     ]));
-    website.with_limit(request.max_pages);
+    if !request.selected_urls.is_empty() {
+        // The explicit seed set and disabled traversal bound this batch. Spider's
+        // frontier budget also counts the root and can omit a selected seed.
+        website.with_on_should_crawl_callback(Some(|_| false));
+    } else {
+        website.with_limit(request.max_pages);
+    }
     website.with_concurrency_limit(Some(request.concurrency));
     website.with_respect_robots_txt(request.respect_robots);
     website.with_user_agent(Some("Ariadne/0.1"));
@@ -406,6 +425,14 @@ async fn crawl_inner(
             .then(|| raw.clone())
         }));
     }
+    let manifest_urls = seeds.clone();
+    if !request.selected_urls.is_empty() {
+        seeds = request
+            .selected_urls
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+    }
     if !seeds.is_empty() {
         seeds.insert(request.seed.to_string());
         website.set_extra_links(seeds.into_iter().map(Into::into).collect());
@@ -432,9 +459,22 @@ async fn crawl_inner(
     let collect = async {
         let mut pages = Vec::new();
         let mut dropped_pages = 0;
+        let mut discovered_urls = manifest_urls;
         loop {
             match receiver.recv().await {
-                Ok(page) => {
+                Ok(mut page) => {
+                    if !request.selected_urls.is_empty() {
+                        let selectors =
+                            spider::page::get_page_selectors(request.seed.as_str(), false, false);
+                        for link in page.links(&selectors, &None).await {
+                            if let Ok(mut url) = Url::parse(link.as_ref()) {
+                                url.set_fragment(None);
+                                if request.scope.contains(&url) {
+                                    discovered_urls.insert(url.to_string());
+                                }
+                            }
+                        }
+                    }
                     if pages.len() >= request.max_pages as usize {
                         dropped_pages += 1;
                     } else {
@@ -448,13 +488,13 @@ async fn crawl_inner(
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
-        (pages, dropped_pages)
+        (pages, dropped_pages, discovered_urls)
     };
     let run = async {
         Box::pin(website.crawl_raw()).await;
         website.unsubscribe();
     };
-    let (_, (mut pages, dropped_pages)) = tokio::join!(run, collect);
+    let (_, (mut pages, dropped_pages, discovered_urls)) = tokio::join!(run, collect);
     let mut revalidated: std::collections::HashMap<_, _> = revalidation_rx
         .try_iter()
         .map(|page| (page.requested_url.clone(), page))
@@ -496,12 +536,15 @@ async fn crawl_inner(
         dropped_pages,
         audit_overflow: overflow.load(Ordering::Relaxed),
         discovery: discovery_report,
+        discovered_urls: discovered_urls.into_iter().collect(),
     })
 }
 
 fn page_outcome(page: Page, request: &CrawlRequest) -> PageOutcome {
     let body = page.get_html_bytes_u8();
-    let state = if page.blocked_crawl {
+    // Selected batches deliberately suppress engine link traversal. Spider
+    // marks that callback result as blocked_crawl even for a successful fetch.
+    let state = if page.blocked_crawl && request.selected_urls.is_empty() {
         PageState::Blocked
     } else if let Some(error) = page
         .error_status

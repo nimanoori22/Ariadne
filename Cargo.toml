@@ -14,7 +14,9 @@ regex = "1"
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
-rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "=3.5.1", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
+axum = { version = "=0.8.9", default-features = false, features = ["tokio", "http1"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 scraper = { package = "spider_scraper", version = "=0.1.2" }
 surrealdb = { version = "=3.3.0", default-features = false, features = ["kv-surrealkv"] }
 surrealkit = { version = "=1.0.0-beta.6", default-features = false }

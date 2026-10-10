@@ -3,13 +3,13 @@ use ariadne::{
     crawler::{CrawlRequest, CrawlScope, crawl},
     embeddings::{OllamaConfig, OllamaProvider, index_source},
     ingestion::{
-        IngestionStatus, extract_crawl, ingest, ingest_lexical, recrawl, recrawl_lexical,
-        reprocess_lexical,
+        IngestionStatus, crawl_site, extract_crawl, ingest, ingest_lexical, recrawl,
+        recrawl_lexical, reprocess_lexical,
     },
     retrieval::{
-        ContextOptions, GraphOptions, SearchMode, SearchQuery, assemble_context,
+        ContextOptions, GraphOptions, RevisionSelector, SearchMode, SearchQuery, assemble_context,
         graph_hybrid_search, graph_search, graph_vector_search, hybrid_search, search,
-        vector_search,
+        search_revision, vector_search,
     },
     storage::{KnowledgeStore, Source},
 };
@@ -25,17 +25,113 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if matches!(args.first().map(String::as_str), Some("--help" | "help")) {
         println!(
-            "Ariadne\n  mcp\n  ingest <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  recrawl <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  reprocess <source-id> <crawl-id> [--max-pages <n>] [--chunk-chars <n>]\n  source status <source-id>\n  document-status <source-id> <url>\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  document <source-id> <url>\n  links <source-id> <url> incoming|outgoing\n  entity <source-id> <qualified-path>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  hybrid-search <query> [--source <id>] [--limit <n>]\n  graph-search <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>]\n  retrieve <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>] [--neighbors <n>] [--context-chars <n>]\n  Graph options: --graph (on retrieve), --graph-seeds <1..8>, --graph-edges <1..8>, --graph-chunks <1..3>, --graph-candidates <1..50>, --graph-links true|false, --graph-entities true|false\n  Search filters: --url-prefix <url> --heading <heading> --crawled-after <unix-seconds>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
+            "Ariadne\n  mcp\n  mcp-http [127.0.0.1:3847]\n  crawl-site <source-id> <crawl-id> [--resume] [--discover] [--concurrency <n>]\n  site-status <source-id> <crawl-id>\n  ingest <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  recrawl <source-id> <crawl-id> [--lexical-only] [--discover] [--browser-fallback] [--max-pages <n>] [--concurrency <n>] [--chunk-chars <n>]\n  reprocess <source-id> <crawl-id> [--max-pages <n>] [--chunk-chars <n>]\n  source status <source-id>\n  document-status <source-id> <url>\n  source add <id> <name> <url>\n  source list\n  crawl <source-id> <crawl-id>\n  run <source-id> <crawl-id>\n  revisions <source-id> <url> [--after <cursor>] [--limit <n>]\n  revision <source-id> <url> <revision-id> [<section-id>]\n  revision-search <source-id> <url> <revision-id> <query> [search options]\n  revision-retrieve <source-id> <url> <revision-id> <query> [search/context options; lexical only]\n  document <source-id> <url>\n  links <source-id> <url> incoming|outgoing\n  entity <source-id> <qualified-path>\n  chunks <source-id> <url>\n  indexing <source-id> <url>\n  search <query> [--source <id>] [--limit <n>] [--mode auto|keywords|exact] [--max-chars <n>]\n  embed <source-id>\n  embeddings spaces\n  embeddings status <source-id>\n  hybrid-search <query> [--source <id>] [--limit <n>]\n  graph-search <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>]\n  retrieve <query> [--retrieval-mode lexical|vector|hybrid] [--source <id>] [--limit <n>] [--neighbors <n>] [--context-chars <n>]\n  Graph options: --graph (on retrieve), --graph-seeds <1..8>, --graph-edges <1..8>, --graph-chunks <1..3>, --graph-candidates <1..50>, --graph-links true|false, --graph-entities true|false\n  Search filters: --url-prefix <url> --heading <heading> --crawled-after <unix-seconds>\n  vector-search <query> [--source <id>] [--limit <n>] [--max-chars <n>]\n\nThe local database is opened and migrated automatically.\nSet ARIADNE_DATA_DIR to override the application data directory.\nEmbeddings use local Ollama: ARIADNE_OLLAMA_URL and ARIADNE_EMBED_MODEL (default embeddinggemma:latest)."
         );
         return Ok(());
     }
+    // Bind before opening storage so duplicate service starts fail without touching it.
+    let http_listener = if args.first().map(String::as_str) == Some("mcp-http") {
+        ensure!(args.len() <= 2, "usage: ariadne mcp-http [127.0.0.1:3847]");
+        let address: std::net::SocketAddr = args
+            .get(1)
+            .map(String::as_str)
+            .unwrap_or("127.0.0.1:3847")
+            .parse()
+            .context("invalid MCP HTTP address")?;
+        ensure!(address.ip().is_loopback(), "MCP HTTP must bind to loopback");
+        Some(
+            tokio::net::TcpListener::bind(address)
+                .await
+                .context("bind MCP HTTP listener")?,
+        )
+    } else {
+        None
+    };
     let store = KnowledgeStore::open_default().await?;
+    if let Some(listener) = http_listener {
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let signal_shutdown = shutdown.clone();
+        #[cfg(unix)]
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let signals = tokio::spawn(async move {
+            #[cfg(unix)]
+            {
+                tokio::select! {
+                    result = tokio::signal::ctrl_c() => { result?; },
+                    _ = terminate.recv() => {},
+                }
+            }
+            #[cfg(not(unix))]
+            tokio::signal::ctrl_c().await?;
+            signal_shutdown.cancel();
+            Ok::<_, std::io::Error>(())
+        });
+        let result = ariadne::mcp::serve_http(
+            store,
+            OllamaConfig::from_env()?,
+            ariadne::jobs::CrawlAccess::from_env()?,
+            listener,
+            shutdown,
+        )
+        .await;
+        signals.abort();
+        return result;
+    }
     match args
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["site-status", source, run] => print_json(
+            &serde_json::json!({"run":store.get_crawl(source,run).await?,"frontier":store.site_coverage(source,run).await?}),
+        )?,
+        ["crawl-site", source, run, options @ ..] => {
+            let source = store
+                .get_source(source)
+                .await?
+                .context("source not found; use source add")?;
+            let scope = CrawlScope::new(source.root_url.clone(), source.root_url.path())?;
+            let mut request =
+                CrawlRequest::new(source.id.clone(), *run, source.root_url.clone(), scope);
+            let mut resume = false;
+            let mut cursor = 0;
+            while cursor < options.len() {
+                match options[cursor] {
+                    "--resume" => {
+                        resume = true;
+                        cursor += 1;
+                    }
+                    "--discover" => {
+                        request.discovery = true;
+                        cursor += 1;
+                    }
+                    "--concurrency" => {
+                        request.concurrency = options
+                            .get(cursor + 1)
+                            .context("missing concurrency")?
+                            .parse()?;
+                        cursor += 2;
+                    }
+                    _ => bail!("unknown crawl-site option; use --help"),
+                }
+            }
+            let result = crawl_site(&store, source, request, Default::default(), resume).await?;
+            let coverage = store
+                .site_coverage(&result.source_id, &result.crawl_id)
+                .await?;
+            print_json(&serde_json::json!({"run":result,"frontier":coverage}))?;
+            ensure!(
+                coverage["failed"] == 0
+                    && coverage["blocked"] == 0
+                    && result
+                        .summary
+                        .as_ref()
+                        .is_some_and(|s| s["rejected_count"] == 0),
+                "site crawl exhausted its queue with failures or rejected content; inspect site-status and run"
+            );
+        }
         ["mcp"] => ariadne::mcp::serve_stdio(store, OllamaConfig::from_env()?).await?,
         [
             operation @ ("ingest" | "recrawl" | "reprocess"),
@@ -250,6 +346,77 @@ async fn main() -> Result<()> {
                 .await?
                 .context("crawl not found")?,
         )?,
+        ["revisions", source, url, options @ ..] => {
+            let mut after = None;
+            let mut limit = 20;
+            let (pairs, remainder) = options.as_chunks::<2>();
+            ensure!(
+                remainder.is_empty(),
+                "revision options require flag and value"
+            );
+            for pair in pairs {
+                match pair {
+                    ["--after", n] => after = Some(n.parse()?),
+                    ["--limit", n] => limit = n.parse()?,
+                    _ => bail!("unknown revision option"),
+                }
+            }
+            print_json(
+                &store
+                    .list_revisions(source, &Url::parse(url)?, after, limit)
+                    .await?,
+            )?;
+        }
+        ["revision", source, url, revision_id, section @ ..] => {
+            let section = match section {
+                [] => None,
+                [id] => Some(id.parse()?),
+                _ => bail!("revision accepts at most one section ID"),
+            };
+            let selector = RevisionSelector {
+                source_id: (*source).into(),
+                document_url: Url::parse(url)?,
+                revision_id: (*revision_id).into(),
+            };
+            print_json(
+                &store
+                    .knowledge_revision(&selector, section, 4000)
+                    .await?
+                    .context("revision or section not found")?,
+            )?;
+        }
+        [
+            operation @ ("revision-search" | "revision-retrieve"),
+            source,
+            url,
+            revision_id,
+            query,
+            options @ ..,
+        ] => {
+            let selector = RevisionSelector {
+                source_id: (*source).into(),
+                document_url: Url::parse(url)?,
+                revision_id: (*revision_id).into(),
+            };
+            let (request, context) = if *operation == "revision-retrieve" {
+                let mut historical_options = vec!["--retrieval-mode", "lexical"];
+                historical_options.extend_from_slice(options);
+                let (request, mode, context) = retrieval_options(query, &historical_options)?;
+                ensure!(
+                    mode == "lexical",
+                    "revision-retrieve supports lexical mode only"
+                );
+                (request, Some(context))
+            } else {
+                (search_query(query, options)?, None)
+            };
+            let hits = search_revision(&store, request, selector).await?;
+            if let Some(context) = context {
+                print_json(&assemble_context(&store, &hits, context).await?)?
+            } else {
+                print_json(&hits)?
+            }
+        }
         ["document", source, url] => print_json(
             &store
                 .get_document(source, &Url::parse(url)?)

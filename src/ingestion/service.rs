@@ -275,6 +275,7 @@ async fn ingest_text(
                     }
                 }
                 CrawlReport {
+                    discovered_urls: vec![],
                     source_id: request.source_id.clone(),
                     crawl_id: request.crawl_id.clone(),
                     started_at,

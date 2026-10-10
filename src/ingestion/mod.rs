@@ -1,6 +1,7 @@
 //! Structured preparation and auditable foreground ingestion orchestration.
 mod incremental;
 mod service;
+mod site;
 use crate::chunking::{ChunkPolicy, DocumentIndex, index_document};
 use crate::{
     crawler::CrawlReport,
@@ -12,6 +13,7 @@ pub use service::{
     IngestionOperation, IngestionProgress, IngestionStage, IngestionStatus, ingest, ingest_lexical,
     recrawl, recrawl_lexical, reprocess_lexical,
 };
+pub use site::crawl_site;
 use std::time::SystemTime;
 
 /// The parallel indexes are private so a caller cannot mismatch documents and

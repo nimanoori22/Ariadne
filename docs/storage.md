@@ -162,3 +162,11 @@ verify that an earlier schema retains sources, abandoned jobs become interrupted
 and copying a closed datastore preserves job/source records. The earlier full-text
 and chunk schema upgrade tests also remain in the suite. This is targeted upgrade
 coverage, not a guarantee for arbitrary future schema changes or engine downgrades.
+
+Document revision history adds immutable `document_revision`, `revision_section`
+and `revision_chunk` tables and a current representation pointer. Backfill occurs
+on the next successful per-document ingestion/recrawl/reprocess, inside the same
+transaction as current data replacement. Startup does not scan/rewrite documents.
+See [document revisions](document-revisions.md) for identity, retrieval and
+retention limits. These tables are included in whole-directory closed-store
+backups.

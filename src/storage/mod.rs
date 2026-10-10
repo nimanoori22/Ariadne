@@ -6,6 +6,8 @@ mod jobs;
 mod knowledge;
 mod recrawl;
 mod retrieval;
+mod revisions;
+mod site;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -98,39 +100,58 @@ impl KnowledgeStore {
     /// request bounds and exact-match policy are applied consistently.
     pub(crate) async fn lexical_search(
         &self,
-        query: &str,
-        source_id: Option<&str>,
-        limit: usize,
-        max_text_chars: usize,
+        request: &crate::retrieval::SearchQuery,
         exact_pattern: &str,
-        filter: &crate::retrieval::MetadataFilter,
+        revision: Option<&crate::retrieval::RevisionSelector>,
     ) -> Result<Vec<crate::retrieval::KnowledgeHit>> {
+        let projection = include_str!("search_projection.surql").replace(
+            "'full_text' AS match_kind",
+            if revision.is_some() {
+                "'full_text' AS match_kind, revision.revision_id AS revision_id"
+            } else {
+                "'full_text' AS match_kind"
+            },
+        );
+        let search_sql = |base: &str| {
+            let sql = base.replace("ORDER BY", &format!("{} {} ORDER BY", include_str!("metadata_filter.surql"), if revision.is_some() { "AND revision = type::record('document_revision', $revision_id) AND data.source_id = $revision_source AND data.document_url = $revision_url" } else { "" }));
+            if revision.is_some() {
+                sql.replace("FROM chunk", "FROM revision_chunk")
+                    .replace("chunk_text_search", "revision_text_search")
+                    .replace("chunk_title_search", "revision_title_search")
+            } else {
+                sql
+            }
+        };
         let mut result = self
             .db
             .query("BEGIN TRANSACTION;")
             .query(format!(
                 "{} {}",
-                include_str!("search_projection.surql"),
-                include_str!("search_text.surql").replace(
-                    "ORDER BY",
-                    &format!("{} ORDER BY", include_str!("metadata_filter.surql"))
-                )
+                projection,
+                search_sql(include_str!("search_text.surql"))
             ))
             .query(format!(
                 "{} {}",
-                include_str!("search_projection.surql"),
-                include_str!("search_title.surql").replace(
-                    "ORDER BY",
-                    &format!("{} ORDER BY", include_str!("metadata_filter.surql"))
-                )
+                projection,
+                search_sql(include_str!("search_title.surql"))
             ))
             .query("COMMIT TRANSACTION;")
-            .bind(("query", query.to_owned()))
-            .bind(("source_id", source_id.unwrap_or_default().to_owned()))
-            .bind(("limit", limit))
-            .bind(("max_text_chars", max_text_chars))
+            .bind(("query", request.query.trim().to_owned()))
+            .bind(("source_id", request.source_id.clone().unwrap_or_default()))
+            .bind(("limit", request.limit))
+            .bind(("max_text_chars", request.max_text_chars))
             .bind(("exact_pattern", exact_pattern.to_owned()))
-            .bind(filter_bindings(filter)?)
+            .bind(("revision_id", revision.map(|r| r.revision_id.clone())))
+            .bind(("revision_source", revision.map(|r| r.source_id.clone())))
+            .bind((
+                "revision_url",
+                revision.map(|r| {
+                    let mut u = r.document_url.clone();
+                    u.set_fragment(None);
+                    u.to_string()
+                }),
+            ))
+            .bind(filter_bindings(&request.filter)?)
             .await
             .context("execute lexical search")?
             .check()
@@ -301,6 +322,14 @@ impl KnowledgeStore {
     /// Persist a preparation performed outside the database boundary. A custom
     /// chunk policy can be supplied to ingestion::prepare_crawl.
     pub async fn finish_prepared_crawl(&self, prepared: PreparedCrawl) -> Result<()> {
+        self.commit_prepared_crawl(prepared, None).await
+    }
+
+    pub(crate) async fn commit_prepared_crawl(
+        &self,
+        prepared: PreparedCrawl,
+        site: Option<Value>,
+    ) -> Result<()> {
         let PreparedCrawl {
             batch,
             indexes,
@@ -443,11 +472,15 @@ impl KnowledgeStore {
         let summary = json!({"started_at": batch.started_at, "finished_at": batch.finished_at, "page_count": pages.len(), "document_count": documents.len() + reused.len(), "chunk_count": chunk_count, "oversized_chunk_count": oversized_chunk_count, "alias_count": extracted_count - documents.len(), "rejected_count": rejected_count, "removed_count":removed.len(),"incremental":incremental,"blocked": batch.blocked, "dropped_pages": batch.dropped_pages, "audit_overflow": batch.audit_overflow, "delivery_complete": batch.dropped_pages == 0 && !batch.audit_overflow,"discovery":batch.discovery,"crawl_elapsed_ms":batch.finished_at.duration_since(batch.started_at).unwrap_or_default().as_millis(),"retained_body_bytes":pages.iter().filter_map(|p|p["page"]["raw_body"].as_array().map(Vec::len)).sum::<usize>()});
         self.transaction(
             &include_str!("finish_crawl.surql")
-                .replace("-- GRAPH_REPLACE", include_str!("replace_graph.surql")),
+                .replace("-- GRAPH_REPLACE", include_str!("replace_graph.surql"))
+                .replace(
+                    "-- ARCHIVE_REVISION",
+                    include_str!("archive_revision.surql"),
+                ),
             json!({
                 "source_id":batch.source_id,"crawl_id":batch.crawl_id,
                 "pages":pages,"documents":documents,"reused":reused,"removed":removed,
-                "summary":summary,"finished":batch.finished_at
+                "summary":summary,"finished":batch.finished_at,"site":site
             }),
         )
         .await
@@ -612,6 +645,9 @@ mod tests {
                 .split("DEFINE TABLE crawl_job")
                 .nth(1)
                 .unwrap()
+                .split("DEFINE INDEX revision_text_search")
+                .next()
+                .unwrap()
         ))
         .await
         .unwrap()
@@ -769,6 +805,37 @@ mod tests {
             .await
             .unwrap();
         assert!(!store.get_chunks("docs", &url).await.unwrap().is_empty());
+        let revisions = store.list_revisions("docs", &url, None, 20).await.unwrap();
+        assert_eq!(revisions["revisions"].as_array().unwrap().len(), 2);
+        assert_eq!(revisions["revisions"][0]["chunk_count"], 0);
+        let revision = crate::retrieval::RevisionSelector {
+            source_id: "docs".into(),
+            document_url: url.clone(),
+            revision_id: revisions["revisions"][0]["revision_id"]
+                .as_str()
+                .unwrap()
+                .into(),
+        };
+        assert_eq!(
+            store
+                .get_revision(&revision)
+                .await
+                .unwrap()
+                .unwrap()
+                .page
+                .crawl_id,
+            "old"
+        );
+        assert!(
+            !store
+                .knowledge_revision(&revision, None, 4000)
+                .await
+                .unwrap()
+                .unwrap()["sections"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -835,11 +902,14 @@ mod tests {
         assert_eq!(original_links["links"].as_array().unwrap().len(), 1);
         assert_eq!(original_mentions["mentions"].as_array().unwrap().len(), 1);
         assert!(!original_search.is_empty());
-        // Fail inside graph replacement after new links and entities are written,
-        // exercising database rollback across audit, retrieval and graph data.
+        // Simulate an indexed pre-history database: the next commit must archive
+        // the old representation before replacing it. Failure must roll back this
+        // backfill as well as new chunks, links and audit records.
+        store.db.query("DELETE revision_chunk; DELETE revision_section; DELETE document_revision; UPDATE document SET current_revision=NONE, revision_sequence=0;").await.unwrap().check().unwrap();
+        // Fail when archiving the new representation, after graph replacement.
         store
             .db
-            .query("DEFINE FIELD data.symbol ON mentions TYPE string ASSERT $value != 'Rejected::new';")
+            .query("DEFINE FIELD data.title ON document_revision TYPE string ASSERT $value != 'Rejected';")
             .await
             .unwrap()
             .check()
@@ -871,6 +941,12 @@ mod tests {
             original
         );
         assert!(store.page_outcomes("docs", "bad").await.unwrap().is_empty());
+        assert!(
+            store.list_revisions("docs", &url, None, 100).await.unwrap()["revisions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             store.get_chunks("docs", &url).await.unwrap(),
             original_chunks
@@ -898,5 +974,19 @@ mod tests {
                 .status,
             "running"
         );
+        store
+            .fail_crawl("docs", "bad", "expected test failure")
+            .await
+            .unwrap();
+        store.begin_crawl(&request("recovered")).await.unwrap();
+        store
+            .finish_crawl(batch("recovered", "Accepted"))
+            .await
+            .unwrap();
+        let revisions = store.list_revisions("docs", &url, None, 100).await.unwrap();
+        assert_eq!(revisions["revisions"].as_array().unwrap().len(), 2);
+        assert_eq!(revisions["revisions"][0]["title"], "Original");
+        assert_eq!(revisions["revisions"][0]["crawl_id"], "good");
+        assert_eq!(revisions["revisions"][1]["title"], "Accepted");
     }
 }

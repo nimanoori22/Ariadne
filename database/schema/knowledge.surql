@@ -55,3 +55,38 @@ DEFINE FIELD document ON mentions TYPE record<document>;
 DEFINE FIELD data ON mentions TYPE object FLEXIBLE;
 DEFINE INDEX mentions_by_document ON mentions FIELDS document;
 DEFINE INDEX mentions_by_entity ON mentions FIELDS out;
+
+-- Immutable indexed representations; current retrieval indexes stay separate.
+DEFINE FIELD current_revision ON document TYPE option<string>;
+DEFINE FIELD revision_sequence ON document TYPE int DEFAULT 0;
+DEFINE TABLE document_revision SCHEMAFULL;
+DEFINE FIELD document ON document_revision TYPE record<document>;
+DEFINE FIELD revision_id ON document_revision TYPE string;
+DEFINE FIELD sequence ON document_revision TYPE int;
+DEFINE FIELD stored_at ON document_revision TYPE object FLEXIBLE;
+DEFINE FIELD data ON document_revision TYPE object FLEXIBLE;
+DEFINE FIELD chunk_count ON document_revision TYPE int;
+DEFINE FIELD section_count ON document_revision TYPE int;
+DEFINE INDEX revisions_by_document ON document_revision FIELDS document, sequence UNIQUE;
+DEFINE TABLE revision_section SCHEMAFULL;
+DEFINE FIELD revision ON revision_section TYPE record<document_revision>;
+DEFINE FIELD sequence ON revision_section TYPE int;
+DEFINE FIELD data ON revision_section TYPE object FLEXIBLE;
+DEFINE INDEX sections_by_revision ON revision_section FIELDS revision, sequence UNIQUE;
+DEFINE TABLE revision_chunk SCHEMAFULL;
+DEFINE FIELD revision ON revision_chunk TYPE record<document_revision>;
+DEFINE FIELD document ON revision_chunk TYPE record<document>;
+DEFINE FIELD sequence ON revision_chunk TYPE int;
+DEFINE FIELD data ON revision_chunk TYPE object FLEXIBLE;
+DEFINE INDEX chunks_by_revision ON revision_chunk FIELDS revision, sequence UNIQUE;
+DEFINE INDEX revision_text_search ON revision_chunk FIELDS data.text FULLTEXT ANALYZER documentation_lexical_v1 BM25;
+DEFINE INDEX revision_title_search ON revision_chunk FIELDS data.title FULLTEXT ANALYZER documentation_lexical_v1 BM25;
+
+-- Durable URL frontier for full-site HTML crawls. A batch commit advances this
+-- frontier in the same transaction as its document and audit writes.
+DEFINE TABLE crawl_url SCHEMAFULL;
+DEFINE FIELD crawl ON crawl_url TYPE record<crawl_run>;
+DEFINE FIELD url ON crawl_url TYPE string;
+DEFINE FIELD status ON crawl_url TYPE string ASSERT $value IN ['pending','done','failed','blocked','skipped'];
+DEFINE FIELD reason ON crawl_url TYPE option<string>;
+DEFINE INDEX frontier_by_crawl ON crawl_url FIELDS crawl, status, url;

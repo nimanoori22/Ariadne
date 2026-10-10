@@ -49,6 +49,8 @@ impl ContextOptions {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ContextMatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
     pub chunk_id: String,
     pub score: f64,
     pub match_kind: MatchKind,
@@ -60,6 +62,8 @@ pub struct ContextMatch {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ContextChunk {
     pub content_kind: ContentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
     pub chunk_id: String,
     pub text: String,
     pub text_truncated: bool,
@@ -77,8 +81,9 @@ pub struct ContextChunk {
     pub crawled_at: SystemTime,
 }
 impl ContextChunk {
-    fn from_chunk(chunk: Chunk, truncated: bool) -> Self {
+    fn from_chunk(chunk: Chunk, truncated: bool, revision_id: Option<String>) -> Self {
         Self {
+            revision_id,
             content_kind: ContentKind::SourceData,
             chunk_id: chunk.id,
             text: chunk.text,
@@ -100,6 +105,8 @@ impl ContextChunk {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ContextPassage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
     pub source_id: String,
     pub source_name: String,
     pub document_url: Url,
@@ -155,9 +162,9 @@ pub async fn assemble_context(
             continue;
         };
         valid_hits.push(hit);
-        matched.push(hit.chunk_id.clone());
+        matched.push((hit.revision_id.clone(), hit.chunk_id.clone()));
         for row in rows {
-            let id = row.chunk.id.clone();
+            let id = (row.revision_id.clone(), row.chunk.id.clone());
             let distance = row.chunk.sequence.abs_diff(matched_sequence);
             neighbors.push((distance, index, row.chunk.sequence, id.clone()));
             if candidates.insert(id, row).is_some() {
@@ -168,7 +175,7 @@ pub async fn assemble_context(
     neighbors.sort();
     matched.extend(neighbors.into_iter().map(|(_, _, _, id)| id));
     let mut included = HashSet::new();
-    let mut groups: HashMap<(String, String), usize> = HashMap::new();
+    let mut groups: HashMap<(String, String, Option<String>), usize> = HashMap::new();
     let candidate_count = candidates.len();
     for id in matched {
         let Some(mut row) = candidates.remove(&id) else {
@@ -191,16 +198,20 @@ pub async fn assemble_context(
         let key = (
             row.chunk.source_id.clone(),
             row.chunk.document_url.to_string(),
+            row.revision_id.clone(),
         );
         let index = *groups.entry(key).or_insert_with(|| {
             let hit = valid_hits
                 .iter()
                 .find(|h| {
-                    h.source_id == row.chunk.source_id && h.document_url == row.chunk.document_url
+                    h.source_id == row.chunk.source_id
+                        && h.document_url == row.chunk.document_url
+                        && h.revision_id == row.revision_id
                 })
                 .unwrap();
             let index = response.passages.len();
             response.passages.push(ContextPassage {
+                revision_id: row.revision_id.clone(),
                 source_id: hit.source_id.clone(),
                 source_name: hit.source_name.clone(),
                 document_url: hit.document_url.clone(),
@@ -212,20 +223,29 @@ pub async fn assemble_context(
         });
         response.passages[index]
             .chunks
-            .push(ContextChunk::from_chunk(row.chunk, row.text_truncated));
+            .push(ContextChunk::from_chunk(
+                row.chunk,
+                row.text_truncated,
+                row.revision_id,
+            ));
     }
     for passage in &mut response.passages {
         passage.chunks.sort_by_key(|c| c.sequence);
         passage.matches = valid_hits
             .iter()
-            .filter(|h| h.source_id == passage.source_id && h.document_url == passage.document_url)
+            .filter(|h| {
+                h.source_id == passage.source_id
+                    && h.document_url == passage.document_url
+                    && h.revision_id == passage.revision_id
+            })
             .map(|h| ContextMatch {
+                revision_id: h.revision_id.clone(),
                 chunk_id: h.chunk_id.clone(),
                 score: h.score,
                 match_kind: h.match_kind,
                 fusion: h.fusion.clone(),
                 graph: h.graph.clone(),
-                text_omitted: !included.contains(&h.chunk_id),
+                text_omitted: !included.contains(&(h.revision_id.clone(), h.chunk_id.clone())),
             })
             .collect();
     }

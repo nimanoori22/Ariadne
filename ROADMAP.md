@@ -34,10 +34,13 @@ reads, atomic recrawl updates and observable graph coverage; see
 with bounded source-local expansion, rank fusion, path evidence and CLI/MCP
 access; see `docs/graph-retrieval.md`. The original four-query fixture retains
 recall@2 of 1.000; a separate synthetic relation fixture improves from 0.500 for
-hybrid to 1.000 with graph assistance. The next work is document version history
-and version-aware retrieval. Hybrid ranking,
+hybrid to 1.000 with graph assistance. Document revision history and explicit historical lexical/context retrieval are
+now implemented; see `docs/document-revisions.md`. The next work is measured
+reranking. Hybrid ranking,
 metadata filters, bounded context expansion, CLI and MCP integration are
-implemented; see `docs/hybrid-retrieval.md`.
+implemented; see `docs/hybrid-retrieval.md`. The installable lowercase CLI and
+full-site HTML crawling with durable, resumable batches are also implemented;
+see `docs/installation.md`.
 
 At the initial roadmap inspection, the repository contained a Rust 2024 package,
 an empty dependency list, and a `src/main.rs` that printed “Hello, world!”. This
@@ -285,7 +288,7 @@ searched through MCP with filters, hybrid ranking, context, and inspectable stat
 1. Browser fallback through Spider for sources whose static responses lack content. **Implemented.**
 2. Useful document-link graph traversal and deterministic entity extraction. **Implemented:** canonical-URL one-hop links, explicit unresolved/removed targets, exact code/heading entity evidence, source filtering, CLI/MCP reads, atomic recrawl updates and version-aware backfill. See `docs/knowledge-graph.md`.
 3. Graph-assisted retrieval, measured against the query relevance set. **Implemented:** opt-in link/shared-entity candidate expansion, bounded source-local reads, replaceable rank fusion, path evidence, metadata filters, context and CLI/MCP integration. Original query recall is retained and synthetic relation recall improves; see `docs/graph-retrieval.md` for evidence and limits.
-4. Document version history and version-aware retrieval.
+4. Document version history and version-aware retrieval. **Implemented:** immutable raw/structured/chunk snapshots, stable representation IDs, atomic replacement/backfill, bounded CLI/MCP revision reads and lexical/context retrieval. Latest search remains the default; historical vectors/graphs and retention are deferred. See `docs/document-revisions.md`.
 5. Reranking, optional LLM-assisted extraction, and task-directed crawling.
 6. Research workflows, cross-source relationships, and agent memory.
 

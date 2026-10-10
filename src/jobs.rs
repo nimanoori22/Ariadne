@@ -3,7 +3,7 @@ use crate::{
     chunking::ChunkPolicy,
     crawler::{CrawlRequest, CrawlScope, network::validate_public_url},
     embeddings::{OllamaConfig, OllamaProvider},
-    ingestion::{ingest, ingest_lexical, recrawl, recrawl_lexical},
+    ingestion::{crawl_site, ingest, ingest_lexical, recrawl, recrawl_lexical},
     storage::{CrawlRun, KnowledgeStore},
 };
 use anyhow::{Context, Result, ensure};
@@ -23,6 +23,7 @@ use tokio::sync::{Semaphore, watch};
 pub enum JobOperation {
     Crawl,
     Recrawl,
+    CrawlSite,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -166,7 +167,8 @@ impl JobManager {
         request.public_network_only = !self.access.allow_private_network;
         request.allow_loopback_redirects = self.access.allow_private_network;
         request.discovery = discovery;
-        request.browser_fallback = self.access.browser_fallback;
+        request.browser_fallback =
+            self.access.browser_fallback && operation != JobOperation::CrawlSite;
         request.validate()?;
         let job = JobRecord {
             id: id.clone(),
@@ -177,7 +179,7 @@ impl JobManager {
             created_at: now,
             finished_at: None,
             elapsed_ms: None,
-            configuration: serde_json::json!({"request":request,"lexical_only":lexical_only,"deadline_seconds":300}),
+            configuration: serde_json::json!({"request":request,"lexical_only":lexical_only,"deadline_seconds":if operation==JobOperation::CrawlSite {None} else {Some(300)}}),
             error: None,
         };
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
@@ -216,6 +218,7 @@ impl JobManager {
                     let mut execution = tokio::spawn(async move {
                         let policy = ChunkPolicy::default();
                         match (operation, lexical_only) {
+                            (JobOperation::CrawlSite, _) => Box::pin(crawl_site(&store, source, request, policy, false)).await,
                             (JobOperation::Crawl, true) => {
                                 Box::pin(ingest_lexical(&store, source, request, policy)).await
                             }
@@ -240,7 +243,7 @@ impl JobManager {
                         biased;
                         value=&mut execution=>Some(value),
                         _=async {if !*cancel_rx.borrow() {let _=cancel_rx.changed().await;}}=>None,
-                        _=tokio::time::sleep(Duration::from_secs(300))=>{
+                        _=async {if operation==JobOperation::CrawlSite {std::future::pending::<()>().await} else {tokio::time::sleep(Duration::from_secs(300)).await}}=>{
                             execution.abort();let _=execution.await;
                             return Ok((JobStatus::Failed,Some("job deadline exceeded".to_owned())));
                         },
@@ -252,9 +255,12 @@ impl JobManager {
                             Ok((JobStatus::Cancelled, None))
                         }
                         Some(Ok(Ok(run))) => {
-                            let partial = run.ingestion.is_some_and(|p| {
+                            let partial = if operation==JobOperation::CrawlSite {
+                                let coverage=manager.store.site_coverage(&run.source_id,&run.crawl_id).await?;
+                                coverage["failed"]!=0 || coverage["blocked"]!=0 || run.summary.as_ref().is_none_or(|s|s["rejected_count"]!=0 || s["frontier_exhausted"]!=true)
+                            } else {run.ingestion.is_some_and(|p| {
                                 p.status != crate::ingestion::IngestionStatus::Completed
-                            });
+                            })};
                             Ok((
                                 if partial {
                                     JobStatus::Partial

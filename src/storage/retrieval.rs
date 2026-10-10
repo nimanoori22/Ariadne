@@ -8,6 +8,8 @@ use crate::{
 pub(crate) struct ContextRow {
     pub chunk: Chunk,
     pub text_truncated: bool,
+    #[serde(default)]
+    pub revision_id: Option<String>,
 }
 impl KnowledgeStore {
     /// Use the pinned engine's built-in rank fusion, keeping ranking independent
@@ -54,7 +56,7 @@ impl KnowledgeStore {
             hits.len() <= 50 && radius <= 3 && (1..=20000).contains(&max_chars),
             "context request exceeds bounds"
         );
-        let matches: Vec<Value> = hits.iter().map(|h| json!({"id":h.chunk_id,"hash":h.content_sha256,"source":h.source_id,"url":h.document_url})).collect();
+        let matches: Vec<Value> = hits.iter().map(|h| json!({"id":h.chunk_id,"hash":h.content_sha256,"source":h.source_id,"url":h.document_url,"revision_id":h.revision_id})).collect();
         let mut result = self
             .db
             .query(include_str!("context.surql"))

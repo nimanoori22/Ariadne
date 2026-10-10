@@ -150,6 +150,7 @@ mod tests {
         let prepared = prepare_incremental(
             &store,
             CrawlReport {
+                discovered_urls: vec![],
                 source_id: "docs".into(),
                 crawl_id: "upgrade".into(),
                 started_at: now,

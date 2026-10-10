@@ -1,5 +1,16 @@
 BEGIN TRANSACTION;
 RETURN $hits.map(|$hit| {
+    IF $hit.revision_id != NULL AND $hit.revision_id != NONE {
+        LET $matched=type::record('revision_chunk',[$hit.revision_id,$hit.id]);
+        IF !record::exists($matched) OR $matched.data.content_sha256 != $hit.hash
+            OR $matched.data.source_id != $hit.source OR $matched.data.document_url != $hit.url { [] }
+        ELSE {
+            SELECT VALUE {chunk:object::extend(data,{text:string::slice(data.text,0,$max_chars),markdown:''}),text_truncated:string::len(data.text)>$max_chars,revision_id:$hit.revision_id}
+            FROM revision_chunk WITH INDEX chunks_by_revision WHERE revision=$matched.revision
+                AND sequence >= math::max([$matched.sequence-$radius,0]) AND sequence <= $matched.sequence+$radius
+            ORDER BY sequence LIMIT 7
+        }
+    } ELSE {
     LET $matched = type::record('chunk', $hit.id);
     IF !record::exists($matched) OR $matched.data.content_sha256 != $hit.hash
         OR $matched.data.source_id != $hit.source OR $matched.data.document_url != $hit.url { [] }
@@ -13,6 +24,7 @@ RETURN $hits.map(|$hit| {
             AND sequence >= math::max([$matched.sequence - $radius, 0])
             AND sequence <= $matched.sequence + $radius
         ORDER BY sequence LIMIT 7
+    }
     }
 });
 COMMIT TRANSACTION;

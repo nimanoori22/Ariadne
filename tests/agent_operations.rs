@@ -153,7 +153,7 @@ async fn two_scoped_sources_can_be_crawled_recrawled_and_read_over_mcp() {
     let server = tokio::spawn(KnowledgeMcp::with_access(store, f.config(), f.access()).serve(a));
     let client = ().serve(b).await.unwrap();
     let server = server.await.unwrap().unwrap();
-    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 11);
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 13);
     let mut ids = vec![];
     for source in ["alpha", "beta"] {
         let started = Instant::now();

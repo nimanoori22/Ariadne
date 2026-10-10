@@ -1,0 +1,15 @@
+[Unit]
+Description=Ariadne shared knowledge MCP server
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ariadne mcp-http 127.0.0.1:3847
+Environment=ARIADNE_DATA_DIR=%h/.local/share/ariadne
+EnvironmentFile=-%h/.config/ariadne/mcp.env
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

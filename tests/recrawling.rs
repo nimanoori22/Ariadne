@@ -240,6 +240,10 @@ async fn setup(site: &Site) -> (tempfile::TempDir, KnowledgeStore, Provider) {
 async fn conditional_recrawl_after_restart_preserves_chunks_and_generates_no_embeddings() {
     let site = Site::start().await;
     let (dir, store, provider) = setup(&site).await;
+    let revisions_before = store
+        .list_revisions("docs", &site.url("a"), None, 100)
+        .await
+        .unwrap();
     let chunks = store.get_chunks("docs", &site.url("a")).await.unwrap();
     let links = store
         .document_links("docs", &site.root, false, 100)
@@ -293,6 +297,13 @@ async fn conditional_recrawl_after_restart_preserves_chunks_and_generates_no_emb
         store.get_chunks("docs", &site.url("a")).await.unwrap(),
         chunks
     );
+    assert_eq!(
+        store
+            .list_revisions("docs", &site.url("a"), None, 100)
+            .await
+            .unwrap(),
+        revisions_before
+    );
     let audits = store.page_outcomes("docs", "unchanged").await.unwrap();
     assert_eq!(audits.len(), 3);
     assert!(audits.iter().all(
@@ -331,6 +342,10 @@ async fn a_changed_page_replaces_only_its_chunks_and_invalidates_its_old_vectors
     let (_dir, store, provider) = setup(&site).await;
     let old = store.get_chunks("docs", &site.url("a")).await.unwrap();
     let unchanged = store.get_chunks("docs", &site.url("b")).await.unwrap();
+    let revisions_before = store
+        .list_revisions("docs", &site.url("a"), None, 100)
+        .await
+        .unwrap();
     site.change("/docs/a", |r| {
         r.etag = Some("\"v2\"".into());
         r.body = r.body.replace("AlphaOriginal", "AlphaChanged");
@@ -346,6 +361,30 @@ async fn a_changed_page_replaces_only_its_chunks_and_invalidates_its_old_vectors
     .await
     .unwrap();
     assert_eq!(run.summary.unwrap()["incremental"]["changed"], 1);
+    let revisions = store
+        .list_revisions("docs", &site.url("a"), None, 100)
+        .await
+        .unwrap();
+    assert_eq!(revisions["revisions"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        revisions["revisions"][0]["revision_id"],
+        revisions_before["revisions"][0]["revision_id"]
+    );
+    let revision = ariadne::retrieval::RevisionSelector {
+        source_id: "docs".into(),
+        document_url: site.url("a"),
+        revision_id: revisions["revisions"][0]["revision_id"]
+            .as_str()
+            .unwrap()
+            .into(),
+    };
+    let hits =
+        ariadne::retrieval::search_revision(&store, SearchQuery::new("AlphaOriginal"), revision)
+            .await
+            .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].chunk_id, old[0].id);
+
     assert_eq!(
         run.ingestion.unwrap().embedding_report.unwrap().generated,
         1
@@ -396,6 +435,10 @@ async fn identical_bytes_and_boilerplate_changes_skip_derived_processing_without
         .entity_mentions("docs", "Client::alpha", 100)
         .await
         .unwrap();
+    let revisions_before = store
+        .list_revisions("docs", &site.url("a"), None, 100)
+        .await
+        .unwrap();
     site.change("/docs/a", |r| {
         r.body = format!("<nav>Changed boilerplate</nav>{}", r.body)
     });
@@ -444,6 +487,13 @@ async fn identical_bytes_and_boilerplate_changes_skip_derived_processing_without
         )
         .unwrap()
         .contains("Changed boilerplate")
+    );
+    assert_eq!(
+        store
+            .list_revisions("docs", &site.url("a"), None, 100)
+            .await
+            .unwrap(),
+        revisions_before
     );
     let audits = store.page_outcomes("docs", "hashes").await.unwrap();
     assert_eq!(
@@ -522,6 +572,18 @@ async fn gone_pages_leave_search_but_keep_raw_content_and_can_be_restored() {
             .len(),
         1
     );
+    let revisions_before = store
+        .list_revisions("docs", &site.url("b"), None, 100)
+        .await
+        .unwrap();
+    let revision = ariadne::retrieval::RevisionSelector {
+        source_id: "docs".into(),
+        document_url: site.url("b"),
+        revision_id: revisions_before["revisions"][0]["revision_id"]
+            .as_str()
+            .unwrap()
+            .into(),
+    };
     site.change("/docs/b", |r| r.status = 410);
     site.change("/docs/a", |r| r.status = 503);
     let run = recrawl_lexical(
@@ -533,6 +595,32 @@ async fn gone_pages_leave_search_but_keep_raw_content_and_can_be_restored() {
     .await
     .unwrap();
     assert_eq!(run.ingestion.unwrap().status, IngestionStatus::Partial);
+    assert_eq!(
+        store
+            .list_revisions("docs", &site.url("b"), None, 100)
+            .await
+            .unwrap(),
+        revisions_before
+    );
+    assert!(
+        !ariadne::retrieval::search_revision(
+            &store,
+            SearchQuery::new("BetaOriginal"),
+            revision.clone()
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    assert!(
+        store
+            .knowledge_revision(&revision, None, 4000)
+            .await
+            .unwrap()
+            .unwrap()
+            .to_string()
+            .contains("BetaOriginal")
+    );
     let summary = run.summary.unwrap();
     assert_eq!(summary["removed_count"], 1);
     assert_eq!(summary["rejected_count"], 1);

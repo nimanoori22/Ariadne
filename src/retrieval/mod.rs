@@ -129,6 +129,37 @@ impl SearchQuery {
     }
 }
 
+/// An explicit, source-scoped immutable indexed representation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionSelector {
+    pub source_id: String,
+    pub document_url: Url,
+    pub revision_id: String,
+}
+impl RevisionSelector {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.source_id.trim().is_empty() && self.source_id.len() <= 1024,
+            "invalid revision source"
+        );
+        ensure!(
+            self.document_url.as_str().len() <= 4096,
+            "invalid revision URL"
+        );
+        crate::crawler::CrawlScope::new(self.document_url.clone(), self.document_url.path())?;
+        ensure!(
+            self.revision_id.len() == 64
+                && self
+                    .revision_id
+                    .bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+            "revision ID must be 64 lowercase hexadecimal characters"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentKind {
@@ -176,6 +207,9 @@ pub struct KnowledgeHit {
     pub fusion: Option<FusionEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graph: Option<GraphEvidence>,
+    /// Present when searching an immutable revision, rather than the live index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
 }
 
 /// Query only one compatible vector space. Lexical retrieval remains usable
@@ -207,6 +241,31 @@ pub async fn vector_search<P: crate::embeddings::EmbeddingProvider>(
 }
 
 pub async fn search(store: &KnowledgeStore, query: SearchQuery) -> Result<Vec<KnowledgeHit>> {
+    search_at(store, query, None).await
+}
+
+/// Lexical retrieval from one immutable revision, independently of Ollama.
+pub async fn search_revision(
+    store: &KnowledgeStore,
+    query: SearchQuery,
+    revision: RevisionSelector,
+) -> Result<Vec<KnowledgeHit>> {
+    revision.validate()?;
+    ensure!(
+        query
+            .source_id
+            .as_ref()
+            .is_none_or(|s| s == &revision.source_id),
+        "source filter conflicts with revision source"
+    );
+    search_at(store, query, Some(&revision)).await
+}
+
+async fn search_at(
+    store: &KnowledgeStore,
+    query: SearchQuery,
+    revision: Option<&RevisionSelector>,
+) -> Result<Vec<KnowledgeHit>> {
     query.validate()?;
     let started = Instant::now();
     let input = query.query.trim();
@@ -220,16 +279,7 @@ pub async fn search(store: &KnowledgeStore, query: SearchQuery) -> Result<Vec<Kn
     } else {
         String::new()
     };
-    let candidates = store
-        .lexical_search(
-            input,
-            query.source_id.as_deref(),
-            query.limit,
-            query.max_text_chars,
-            &pattern,
-            &query.filter,
-        )
-        .await?;
+    let candidates = store.lexical_search(&query, &pattern, revision).await?;
     let mut by_chunk: HashMap<String, KnowledgeHit> = HashMap::new();
     for mut hit in candidates {
         ensure!(

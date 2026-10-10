@@ -4,6 +4,9 @@ Step 9 connects the existing Spider adapter, structured extraction, semantic
 chunking, embedded SurrealDB and Ollama embeddings. The MCP server uses the
 [official Rust SDK](https://github.com/modelcontextprotocol/rust-sdk).
 
+For an installed CLI, a complete scoped HTML crawl and Codex setup, see
+[installation and full-site crawling](installation.md).
+
 ## Local workflow
 
 Build the binary and start your local Ollama service with `embeddinggemma`
@@ -61,7 +64,17 @@ Hybrid mode, metadata filters and optional bounded context expansion are now
 available through the same `search` tool. See [hybrid retrieval](hybrid-retrieval.md)
 for arguments, scores, budgets and evaluation limits.
 
-## MCP client configuration
+## Shared HTTP server
+
+For multiple Codex sessions, use `ariadne mcp-http` and configure the client
+with `http://127.0.0.1:3847/mcp`. One server owns the embedded datastore and all
+clients share bounded requests, embeddings and supervised jobs. Client session
+teardown does not cancel shared jobs. See [installation](installation.md#codex)
+for the user service and migration from stdio. SIGINT/SIGTERM cancel sessions
+and jobs before shutdown. The HTTP listener accepts only loopback addresses
+and enforces Host and Origin checks through the official SDK.
+
+## MCP client configuration (stdio)
 
 Configure a stdio server in your MCP client, using an absolute binary path:
 
@@ -86,7 +99,7 @@ One application process owns the embedded database. Stop the MCP process before
 running CLI ingestion against the same directory, then restart it. Use a stable
 data directory outside `/tmp` for durable use.
 
-The server exposes eleven knowledge tools. `get_links` and `find_entity` are described in [knowledge graph](knowledge-graph.md). `search` retains this interface; document, source and supervised crawl operations are described in [agent operations](agent-operations.md):
+The server exposes thirteen knowledge tools. `list_revisions` and optional historical document/search selection are described in [document revisions](document-revisions.md). `get_links` and `find_entity` are described in [knowledge graph](knowledge-graph.md). `search` retains this interface; document, source and supervised crawl operations are described in [agent operations](agent-operations.md):
 
 ```json
 {
